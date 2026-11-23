@@ -1,0 +1,17 @@
+[package]
+name = "itacoin-crypto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "BLAKE3 hashing and ML-DSA-65 signatures for ITACOIN."
+
+[dependencies]
+blake3.workspace = true
+itacoin-primitives = { path = "../itacoin-primitives" }
+ml-dsa.workspace = true
+zeroize.workspace = true
+
+[lints]
+workspace = true

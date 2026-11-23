@@ -1,0 +1,43 @@
+[workspace]
+members = [
+    "crates/itacoin-primitives",
+    "crates/itacoin-crypto",
+    "crates/itacoin-wallet",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/itacoin/itacoin"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[workspace.dependencies]
+argon2 = { version = "=0.5.3", default-features = false, features = ["std", "zeroize"] }
+bech32 = { version = "=0.11.0", default-features = false, features = ["alloc"] }
+blake3 = "=1.8.2"
+chacha20poly1305 = { version = "=0.10.1", default-features = false, features = ["std", "getrandom"] }
+ml-dsa = { version = "=0.1.2", default-features = false, features = ["alloc", "getrandom", "zeroize"] }
+rand_core = { version = "=0.6.4", features = ["getrandom"] }
+zeroize = { version = "=1.8.2", features = ["derive"] }
+
+# Argon2id and ML-DSA are prohibitively slow without optimization, which would
+# make the security-relevant test suite slow enough to be skipped in practice.
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3
+
+[profile.dev.package.ml-dsa]
+opt-level = 3
+
+[profile.release]
+overflow-checks = true
+lto = "thin"
+codegen-units = 1

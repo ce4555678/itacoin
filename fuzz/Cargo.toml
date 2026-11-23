@@ -1,0 +1,52 @@
+[package]
+name = "itacoin-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "=0.4.10"
+itacoin-crypto = { path = "../crates/itacoin-crypto" }
+itacoin-primitives = { path = "../crates/itacoin-primitives" }
+itacoin-wallet = { path = "../crates/itacoin-wallet" }
+
+# Kept out of the main workspace: it needs nightly and cargo-fuzz.
+[workspace]
+
+[[bin]]
+name = "signature"
+path = "fuzz_targets/signature.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "public_key"
+path = "fuzz_targets/public_key.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "encrypted_wallet"
+path = "fuzz_targets/encrypted_wallet.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "address"
+path = "fuzz_targets/address.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "amount"
+path = "fuzz_targets/amount.rs"
+test = false
+doc = false
+bench = false
