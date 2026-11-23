@@ -328,6 +328,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "itacoin-blockchain"
+version = "0.1.0"
+dependencies = [
+ "itacoin-codec",
+ "itacoin-crypto",
+ "itacoin-primitives",
+ "itacoin-transaction",
+]
+
+[[package]]
+name = "itacoin-codec"
+version = "0.1.0"
+dependencies = [
+ "itacoin-crypto",
+ "itacoin-primitives",
+]
+
+[[package]]
 name = "itacoin-crypto"
 version = "0.1.0"
 dependencies = [
@@ -342,6 +360,15 @@ name = "itacoin-primitives"
 version = "0.1.0"
 dependencies = [
  "bech32",
+]
+
+[[package]]
+name = "itacoin-transaction"
+version = "0.1.0"
+dependencies = [
+ "itacoin-codec",
+ "itacoin-crypto",
+ "itacoin-primitives",
 ]
 
 [[package]]

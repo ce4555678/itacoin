@@ -1,0 +1,16 @@
+[package]
+name = "itacoin-transaction"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "ITACOIN transactions: canonical encoding, identifiers and spend validation."
+
+[dependencies]
+itacoin-codec = { path = "../itacoin-codec" }
+itacoin-crypto = { path = "../itacoin-crypto" }
+itacoin-primitives = { path = "../itacoin-primitives" }
+
+[lints]
+workspace = true

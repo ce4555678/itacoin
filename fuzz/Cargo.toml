@@ -12,6 +12,9 @@ libfuzzer-sys = "=0.4.10"
 itacoin-crypto = { path = "../crates/itacoin-crypto" }
 itacoin-primitives = { path = "../crates/itacoin-primitives" }
 itacoin-wallet = { path = "../crates/itacoin-wallet" }
+itacoin-codec = { path = "../crates/itacoin-codec" }
+itacoin-transaction = { path = "../crates/itacoin-transaction" }
+itacoin-blockchain = { path = "../crates/itacoin-blockchain" }
 
 # Kept out of the main workspace: it needs nightly and cargo-fuzz.
 [workspace]
@@ -47,6 +50,20 @@ bench = false
 [[bin]]
 name = "amount"
 path = "fuzz_targets/amount.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "transaction"
+path = "fuzz_targets/transaction.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "block"
+path = "fuzz_targets/block.rs"
 test = false
 doc = false
 bench = false

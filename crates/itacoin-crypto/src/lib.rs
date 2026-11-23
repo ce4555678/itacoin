@@ -30,6 +30,9 @@ const MERKLE_LEAF_CONTEXT: &str = "itacoin:merkle:leaf:v2";
 const MERKLE_NODE_CONTEXT: &str = "itacoin:merkle:node:v2";
 const WALLET_ID_CONTEXT: &str = "itacoin:wallet-id:v1";
 const INTERNAL_HASH_CONTEXT: &str = "itacoin:internal:v1";
+const WITNESS_HASH_CONTEXT: &str = "itacoin:witness:v1";
+const SPENT_OUTPUTS_CONTEXT: &str = "itacoin:spent-outputs:v1";
+const SIGHASH_CONTEXT: &str = "itacoin:sighash:v1";
 
 /// Upper bound on the number of leaves [`merkle_root`] accepts.
 ///
@@ -51,6 +54,39 @@ pub fn block_hash(header: &[u8]) -> BlockId {
 #[must_use]
 pub fn transaction_hash(transaction: &[u8]) -> TransactionId {
     TransactionId::new(hash_parts(TRANSACTION_HASH_CONTEXT, &[transaction]))
+}
+
+/// Hashes the canonical encoding of a transaction's witness section.
+///
+/// Witnesses are excluded from the transaction id, so this hash is what lets a
+/// block commit to them through its witness root.
+#[must_use]
+pub fn witness_hash(witnesses: &[u8]) -> Hash256 {
+    hash_parts(WITNESS_HASH_CONTEXT, &[witnesses])
+}
+
+/// Hashes the canonical encodings of the outputs a transaction spends, in
+/// input order.
+#[must_use]
+pub fn spent_outputs_hash(outputs: &[u8]) -> Hash256 {
+    hash_parts(SPENT_OUTPUTS_CONTEXT, &[outputs])
+}
+
+/// Computes the message every witness of a transaction signs.
+///
+/// It binds the signature to one chain (`chain_id`, the genesis block id), to
+/// the witness-free transaction id, and to the values and owners of the spent
+/// outputs, so an offline signer cannot be misled about the amounts it spends.
+#[must_use]
+pub fn sighash(chain_id: &Hash256, txid: &TransactionId, spent_outputs: &Hash256) -> Hash256 {
+    hash_parts(
+        SIGHASH_CONTEXT,
+        &[
+            chain_id.as_bytes(),
+            txid.as_bytes(),
+            spent_outputs.as_bytes(),
+        ],
+    )
 }
 
 /// Derives a stable wallet identifier from a parsed ML-DSA-65 public key.
@@ -419,6 +455,34 @@ mod tests {
             transaction_hash(bytes).as_bytes()
         );
         assert_ne!(internal_hash(b"a", b"bc"), internal_hash(b"ab", b"c"));
+    }
+
+    #[test]
+    fn every_hash_context_is_distinct() {
+        let contexts = [
+            BLOCK_HASH_CONTEXT,
+            TRANSACTION_HASH_CONTEXT,
+            MERKLE_EMPTY_CONTEXT,
+            MERKLE_LEAF_CONTEXT,
+            MERKLE_NODE_CONTEXT,
+            WALLET_ID_CONTEXT,
+            INTERNAL_HASH_CONTEXT,
+            WITNESS_HASH_CONTEXT,
+            SPENT_OUTPUTS_CONTEXT,
+            SIGHASH_CONTEXT,
+        ];
+        let mut hashes: Vec<Hash256> = contexts
+            .iter()
+            .map(|context| hash_parts(context, &[b"same input"]))
+            .collect();
+        hashes.sort();
+        hashes.dedup();
+        assert_eq!(hashes.len(), contexts.len());
+        assert_eq!(
+            witness_hash(b"x"),
+            hash_parts(WITNESS_HASH_CONTEXT, &[b"x"])
+        );
+        assert_ne!(witness_hash(b"x"), spent_outputs_hash(b"x"));
     }
 
     fn leaves(count: usize) -> Vec<Hash256> {

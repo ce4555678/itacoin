@@ -2,12 +2,13 @@
 
 Fundação técnica inicial da ITACOIN, uma blockchain Layer 1 experimental em Rust.
 
-O workspace implementa somente a primeira etapa: primitivas monetárias,
-endereços Bech32m com checksum, hashes BLAKE3 com separação de domínio, Merkle
-tree no formato RFC 6962, assinaturas ML-DSA-65 hedged e vinculadas a um
-domínio, e uma carteira local criptografada com arquivo autenticado e proteção
-contra rollback.
-Ele não implementa consenso, transações, mineração, rede, RPC ou regras de
+O workspace implementa primitivas monetárias, endereços Bech32m com checksum,
+hashes BLAKE3 com separação de domínio, Merkle tree no formato RFC 6962,
+assinaturas ML-DSA-65 hedged e vinculadas a um domínio, uma carteira local
+criptografada com arquivo autenticado e proteção contra rollback, e o
+[codec canônico](docs/CODEC_PROPOSAL.md) de transações e blocos, com a
+validação que não depende do estado da cadeia.
+Ele não implementa UTXO set, consenso, mineração, rede, RPC ou regras de
 emissão. Não está pronto para produção ou para guardar fundos reais.
 
 ## Segurança e compatibilidade
@@ -53,6 +54,5 @@ esse valor antes de ser incorporada ao consenso.
 ## Escopo futuro reservado
 
 Os diretórios para os demais componentes são reservados para etapas futuras:
-`itacoin-codec`, `itacoin-transaction`, `itacoin-blockchain`,
 `itacoin-consensus`, `itacoin-storage`, `itacoin-network`, `itacoin-miner`,
 `itacoin-rpc` e `itacoin-node`.

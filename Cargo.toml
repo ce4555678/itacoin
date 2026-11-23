@@ -3,6 +3,9 @@ members = [
     "crates/itacoin-primitives",
     "crates/itacoin-crypto",
     "crates/itacoin-wallet",
+    "crates/itacoin-codec",
+    "crates/itacoin-transaction",
+    "crates/itacoin-blockchain",
 ]
 resolver = "2"
 

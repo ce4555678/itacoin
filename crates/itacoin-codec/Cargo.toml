@@ -1,0 +1,15 @@
+[package]
+name = "itacoin-codec"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Canonical, strict binary encoding for ITACOIN protocol values."
+
+[dependencies]
+itacoin-crypto = { path = "../itacoin-crypto" }
+itacoin-primitives = { path = "../itacoin-primitives" }
+
+[lints]
+workspace = true

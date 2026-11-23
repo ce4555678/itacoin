@@ -13,11 +13,11 @@ O relatório de auditoria é mantido como registro histórico e não é editado.
 | V-06 | Senha e KDF fracos | **Corrigido**: senha de 12 a 1024 bytes; Argon2id 64 MiB/3/4 por padrão, parâmetros autenticados e limitados | `Password`, `KdfParams` |
 | V-07 | Segredos residuais em memória | **Parcial**: `Password` e `to_seed` zeroizáveis. `mlock` e desabilitação de core dump são política do processo e exigem `unsafe`/libc, que o workspace proíbe; ficam para o binário (`itacoin-node` ou CLI da carteira), que deve chamar `setrlimit(RLIMIT_CORE, 0)` e `prctl(PR_SET_DUMPABLE, 0)` ao iniciar | `itacoin-wallet`, `itacoin-crypto` |
 | V-08 | Endereço sem checksum; `wallet_id` aceita bytes arbitrários | **Corrigido**: `Address` Bech32m versionado por rede; `wallet_id` exige `PublicKey` | `itacoin-primitives::Address` |
-| V-09 | Entradas sem limite de tamanho | **Parcial**: `merkle_root` limitado a 2^20 folhas. Limites de bytes de bloco/transação ficam para o codec | `MAX_MERKLE_LEAVES` |
+| V-09 | Entradas sem limite de tamanho | **Corrigido**: `merkle_root` limitado a 2^20 folhas; o codec recusa transações acima de `MAX_TX_BYTES` e blocos acima de `MAX_BLOCK_BYTES` antes de decodificar, e confere cada contagem contra os bytes restantes antes de alocar. Os valores dos limites são provisórios | `MAX_MERKLE_LEAVES`, `itacoin-codec`, `itacoin-transaction`, `itacoin-blockchain` |
 | I-01 | `PublicKey::from_bytes` valida só comprimento | Documentado; prova de posse fica para o consenso | `docs/SECURITY.md` |
 | I-02 | Vetores ACVP incompletos | **Corrigido**: `keyGen` (2 casos), `sigGen` determinístico e hedged (30 casos, comparação byte a byte) e `sigVer` (15 casos, 3 válidos e 12 inválidos) de ML-DSA-65, interface `external`/`pure` | `itacoin-crypto::mldsa`, `crates/itacoin-crypto/vectors/` |
 | I-03 | Limite de `Amount` não é invariante de suprimento | **Aberto**: depende do UTXO set | — |
-| I-04 | Sem Git, CI ou detecção de mudanças | **Parcial**: CI com fmt, Clippy, testes, `cargo audit` e 60 s de fuzzing por alvo. Falta o commit inicial | `.github/workflows/ci.yml` |
+| I-04 | Sem Git, CI ou detecção de mudanças | **Corrigido**: commit inicial, `detect_changes` funcionando; CI com fmt, Clippy, testes, `cargo audit` e 60 s de fuzzing por alvo | `.github/workflows/ci.yml` |
 | I-05 | Duplicação de dependências | Aceito; versões fixadas e monitoradas pelo `cargo audit` | — |
 | P-07 | I/O de carteira | **Corrigido**: `0600`, escrita atômica, `fsync` de arquivo e diretório, sem sobrescrita, e lock exclusivo entre processos em `.<nome>.lock` durante `write_new`/`replace` (`WalletError::Locked`). MSRV passou para 1.89 por `File::try_lock` | `itacoin-wallet::storage` |
 | P-08 | Encoding de endereço com checksum | **Corrigido** (ver V-08) | — |
@@ -39,7 +39,8 @@ Nada foi lançado, mas estas mudanças alteram valores e APIs da etapa 1:
 ## Fuzzing
 
 `fuzz/` contém alvos `cargo-fuzz` (fora do workspace, exigem nightly) para
-`Signature`, `PublicKey`, `EncryptedWallet`, `Address` e `Amount`. Cada alvo
+`Signature`, `PublicKey`, `EncryptedWallet`, `Address`, `Amount`,
+`Transaction` e `Block`. Cada alvo
 exige ausência de panic e ida e volta canônica dos bytes ou do texto aceitos:
 
 ```sh
@@ -48,7 +49,8 @@ cargo +nightly fuzz run encrypted_wallet -- -max_total_time=60
 
 ## Próximos passos
 
-1. Commit inicial e reindexação do GitNexus para habilitar `detect_changes`.
-2. Fase 0 da auditoria: aprovar a emissão e especificar o codec canônico, que
-   destravam `itacoin-codec` e `itacoin-transaction`.
+1. Aprovar a [emissão](EMISSION_PROPOSAL.md) e o intervalo de bloco, que
+   fixam os limites provisórios do codec.
+2. Fase 3: UTXO set com conservação de valor, testes de double spend e a
+   invariante de suprimento acumulado (I-03).
 3. Fuzzing contínuo (OSS-Fuzz ou execução longa agendada), além do job curto do CI.
