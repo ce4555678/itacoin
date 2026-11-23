@@ -21,10 +21,12 @@ ml-kem.workspace = true
 rand_core.workspace = true
 siphasher.workspace = true
 tokio.workspace = true
+tracing.workspace = true
 x25519-dalek.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+itacoin-miner = { path = "../itacoin-miner" }
 itacoin-crypto = { path = "../itacoin-crypto" }
 tempfile = "=3.27.0"
 

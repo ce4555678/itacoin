@@ -12,7 +12,6 @@ pub mod headers;
 pub mod limits;
 pub mod message;
 pub mod node;
-pub mod template;
 pub mod transport;
 
 /// Network errors.

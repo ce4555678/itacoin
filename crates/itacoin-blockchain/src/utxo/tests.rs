@@ -387,3 +387,41 @@ fn random_chains_apply_and_revert_exactly() {
     }
     assert_eq!(set, UtxoSet::new());
 }
+
+#[test]
+fn the_wallet_index_follows_applied_and_reverted_blocks() {
+    let key = KeyPair::generate().unwrap();
+    let owner = key.public_key.wallet_id();
+    let (mut set, _, coin) = genesis(&key);
+    assert_eq!(set.outpoints_of(&owner).collect::<Vec<_>>(), vec![&coin.0]);
+
+    let payment = spend(
+        &key,
+        &[coin],
+        vec![pay(30 * COIN, stranger()), pay(20 * COIN, owner)],
+    );
+    let block = block_on(&set, vec![pay(50 * COIN, owner)], vec![payment.clone()]);
+    let before = set.clone();
+    let undo = set.apply_block(&block, &rules(50 * COIN, 0)).unwrap();
+
+    let mut owned: Vec<OutPoint> = set.outpoints_of(&owner).copied().collect();
+    owned.sort();
+    let mut expected = vec![outpoint(&block.transactions()[0], 0), outpoint(&payment, 1)];
+    expected.sort();
+    assert_eq!(owned, expected);
+    assert_eq!(
+        set.outpoints_of(&stranger()).collect::<Vec<_>>(),
+        vec![&outpoint(&payment, 0)]
+    );
+
+    set.revert_block(&block, &undo).unwrap();
+    assert_eq!(set, before);
+    assert_eq!(set.outpoints_of(&stranger()).count(), 0);
+    // A set rebuilt from its coins has the same index.
+    let rebuilt = UtxoSet::from_parts(
+        set.coins().map(|(outpoint, coin)| (*outpoint, *coin)),
+        set.tip(),
+    )
+    .unwrap();
+    assert_eq!(rebuilt, set);
+}

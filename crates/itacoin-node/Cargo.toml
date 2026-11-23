@@ -1,0 +1,38 @@
+[package]
+name = "itacoin-node"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The ITACOIN full node: P2P network, RPC and embedded miner."
+
+[features]
+# The main network stays out of default builds until the handshake and
+# ML-DSA reviews are done (section 6.3 of docs/NODE_PROPOSAL.md).
+mainnet = []
+
+[dependencies]
+clap.workspace = true
+itacoin-blockchain = { path = "../itacoin-blockchain" }
+itacoin-consensus = { path = "../itacoin-consensus" }
+itacoin-miner = { path = "../itacoin-miner" }
+itacoin-network = { path = "../itacoin-network" }
+itacoin-primitives = { path = "../itacoin-primitives" }
+itacoin-rpc = { path = "../itacoin-rpc" }
+rustix.workspace = true
+serde.workspace = true
+tokio = { workspace = true, features = ["signal"] }
+toml.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+itacoin-codec = { path = "../itacoin-codec" }
+itacoin-crypto = { path = "../itacoin-crypto" }
+itacoin-transaction = { path = "../itacoin-transaction" }
+serde_json.workspace = true
+tempfile = "=3.27.0"
+
+[lints]
+workspace = true

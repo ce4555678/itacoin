@@ -12,8 +12,10 @@ de [consenso](docs/CONSENSUS_PROPOSAL.md): emissão, prova de trabalho Argon2id,
 dificuldade aserti3-2d, timestamps e escolha da cadeia de maior trabalho com
 reorganização. A [rede P2P](docs/NETWORK_PROPOSAL.md) usa transporte
 criptografado pós-quântico (X25519 + ML-KEM-768), sincronização por cabeçalhos,
-mempool com RBF e *compact blocks*.
-Ele não implementa mineração, RPC nem um binário de nó. Não está pronto para produção ou para guardar fundos reais.
+mempool com RBF e *compact blocks*. O [nó](docs/NODE_PROPOSAL.md)
+`itacoin-node` junta rede, JSON-RPC e um minerador embutido de várias
+threads; `itacoin-cli` é o cliente do RPC. Não está pronto para produção ou
+para guardar fundos reais.
 
 ## Segurança e compatibilidade
 
@@ -54,8 +56,23 @@ unidades mínimas). A [curva de emissão](docs/EMISSION_PROPOSAL.md) é linear d
 eras de 262.800 blocos (≈ 100 anos), e um teste soma todas as recompensas e
 exige igualdade exata com esse valor.
 
-## Escopo futuro reservado
+## Rodando um nó
 
-Os diretórios para os demais componentes são reservados para etapas futuras:
-`itacoin-miner`,
-`itacoin-rpc` e `itacoin-node`.
+```sh
+cargo build --release
+# Regtest local: blocos na hora, sem PoW real.
+target/release/itacoin-node --network regtest
+target/release/itacoin-cli --network regtest generatetoaddress 10 <endereço ritc1…>
+target/release/itacoin-cli --network regtest getblockchaininfo
+
+# Testnet, minerando com núcleos − 1.
+target/release/itacoin-node --network testnet --mine --mine-address <endereço titc1…>
+```
+
+`--network` é obrigatório. Os dados ficam em `~/.itacoin/<rede>/` (mude a
+base com `--datadir`), onde também pode ficar um `itacoin.toml` com as mesmas
+opções da linha de comando. O RPC escuta só em loopback e autentica pelo
+arquivo `.cookie` do diretório de dados, que o `itacoin-cli` lê sozinho. A
+mainnet só existe num build com `--features mainnet`, até as revisões
+criptográficas pendentes. O nó nunca carrega chave privada: transações
+chegam assinadas por `sendrawtransaction`.

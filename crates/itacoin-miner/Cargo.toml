@@ -1,0 +1,23 @@
+[package]
+name = "itacoin-miner"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "ITACOIN block templates and the multi-threaded Argon2id miner."
+
+[dependencies]
+itacoin-blockchain = { path = "../itacoin-blockchain" }
+itacoin-consensus = { path = "../itacoin-consensus" }
+itacoin-mempool = { path = "../itacoin-mempool" }
+itacoin-primitives = { path = "../itacoin-primitives" }
+itacoin-storage = { path = "../itacoin-storage" }
+itacoin-transaction = { path = "../itacoin-transaction" }
+tokio = { workspace = true }
+
+[dev-dependencies]
+tempfile = "=3.27.0"
+
+[lints]
+workspace = true

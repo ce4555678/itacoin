@@ -28,6 +28,7 @@ use tokio::{
     net::{TcpListener, TcpStream},
     sync::{mpsc, oneshot},
 };
+use tracing::debug;
 
 use crate::{
     NetError,
@@ -284,6 +285,44 @@ pub struct Stats {
     pub compact_fallback: u64,
 }
 
+/// What happened to a submitted block.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BlockVerdict {
+    /// It passed validation: new tip, side chain or already known.
+    Accepted(SubmitOutcome),
+    /// Its parent is unknown.
+    Orphan,
+    /// Its timestamp is too far in the future; it may be retried later.
+    Deferred,
+    /// It is invalid.
+    Rejected(String),
+}
+
+/// A connected peer, for diagnostics.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PeerInfo {
+    /// Its address.
+    pub addr: SocketAddr,
+    /// Why the connection exists.
+    pub kind: ConnKind,
+    /// Whether the handshake completed.
+    pub ready: bool,
+    /// Its protocol version, once known.
+    pub protocol: Option<u32>,
+    /// Its user agent, once known.
+    pub user_agent: Option<String>,
+    /// The tip height it announced in `version`.
+    pub start_height: Option<u64>,
+    /// Whether it relays transactions and addresses to us.
+    pub relay: bool,
+    /// Lowest ping round trip seen.
+    pub min_ping: Option<Duration>,
+    /// How long it has been connected.
+    pub connected_for: Duration,
+    /// Blocks it has in flight to us.
+    pub blocks_in_flight: usize,
+}
+
 /// The node's state, owned by the core thread.
 pub struct Core {
     config: NodeConfig,
@@ -312,18 +351,6 @@ fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs())
-}
-
-fn debug_enabled() -> bool {
-    std::env::var_os("ITACOIN_NET_LOG").is_some()
-}
-
-macro_rules! debug {
-    ($($arg:tt)*) => {
-        if debug_enabled() {
-            eprintln!("[itacoin-net] {}", format!($($arg)*));
-        }
-    };
 }
 
 impl Core {
@@ -376,6 +403,126 @@ impl Core {
     #[must_use]
     pub fn is_discouraged(&self, ip: &IpAddr) -> bool {
         self.discouraged.contains(ip, Instant::now())
+    }
+
+    /// The configuration the node runs with.
+    #[must_use]
+    pub const fn config(&self) -> &NodeConfig {
+        &self.config
+    }
+
+    /// Details of every connection.
+    #[must_use]
+    pub fn peer_info(&self) -> Vec<PeerInfo> {
+        let now = Instant::now();
+        let mut peers: Vec<(PeerId, PeerInfo)> = self
+            .peers
+            .iter()
+            .map(|(id, peer)| {
+                (
+                    *id,
+                    PeerInfo {
+                        addr: peer.addr,
+                        kind: peer.kind,
+                        ready: peer.ready,
+                        protocol: peer.version.as_ref().map(|version| version.protocol),
+                        user_agent: peer
+                            .version
+                            .as_ref()
+                            .map(|version| version.user_agent.clone()),
+                        start_height: peer.version.as_ref().map(|version| version.height),
+                        relay: peer.relays(),
+                        min_ping: peer.min_ping,
+                        connected_for: now.duration_since(peer.connected_at),
+                        blocks_in_flight: peer.in_flight.len(),
+                    },
+                )
+            })
+            .collect();
+        peers.sort_by_key(|(id, _)| *id);
+        peers.into_iter().map(|(_, info)| info).collect()
+    }
+
+    /// Whether the node is still catching up: the header tree knows a chain
+    /// with more work than the active tip, or a peer announced a higher tip.
+    #[must_use]
+    pub fn is_initial_block_download(&self) -> bool {
+        let Some(tip) = self.chain.tip() else {
+            return true;
+        };
+        let tip_work = self
+            .chain
+            .entry(&tip.block_id)
+            .map_or(U256::ZERO, |entry| entry.chain_work);
+        let best = self.tree.best().1;
+        if !best.invalid && best.work > tip_work {
+            return true;
+        }
+        self.peers.values().any(|peer| {
+            peer.ready
+                && peer
+                    .version
+                    .as_ref()
+                    .is_some_and(|version| version.height > tip.height)
+        })
+    }
+
+    /// Keeps a connection to `addr`, reconnecting when it drops.
+    pub fn add_node(&mut self, addr: SocketAddr) {
+        if !self.config.add_nodes.contains(&addr) {
+            self.config.add_nodes.push(addr);
+        }
+        self.connect_outbound(addr, ConnKind::Manual);
+    }
+
+    /// Stops keeping a connection to `addr`. Returns whether it was listed.
+    pub fn remove_node(&mut self, addr: SocketAddr) -> bool {
+        let before = self.config.add_nodes.len();
+        self.config.add_nodes.retain(|listed| *listed != addr);
+        before != self.config.add_nodes.len()
+    }
+
+    /// Connects once to `addr`, without reconnecting.
+    pub fn connect_once(&mut self, addr: SocketAddr) {
+        self.connect_outbound(addr, ConnKind::Manual);
+    }
+
+    /// Disconnects every peer at `addr`. Returns how many were connected.
+    pub fn disconnect_addr(&mut self, addr: SocketAddr) -> usize {
+        let ids: Vec<PeerId> = self
+            .peers
+            .iter()
+            .filter(|(_, peer)| peer.addr == addr)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in &ids {
+            self.disconnect(*id);
+        }
+        ids.len()
+    }
+
+    /// Discouraged IPs and the time each stays discouraged.
+    #[must_use]
+    pub fn discouraged(&self) -> Vec<(IpAddr, Duration)> {
+        self.discouraged.list(Instant::now())
+    }
+
+    /// Forgets every discouraged IP.
+    pub fn clear_discouraged(&mut self) {
+        self.discouraged = Discouraged::default();
+    }
+
+    /// Submits a locally produced block and reports what happened to it.
+    pub fn submit_local_block(&mut self, block: Block) -> BlockVerdict {
+        self.handle_block(block, None)
+    }
+
+    /// Submits a locally produced transaction to the mempool and relays it.
+    pub fn submit_local_transaction(
+        &mut self,
+        transaction: Transaction,
+    ) -> Result<Added, MempoolError> {
+        self.on_transaction(None, transaction)
     }
 
     fn magic(&self) -> [u8; 4] {
@@ -656,7 +803,9 @@ impl Core {
             Message::Tx(transaction) => {
                 let _ = self.on_transaction(Some(peer), transaction);
             }
-            Message::Block(block) => self.handle_block(block, Some(peer)),
+            Message::Block(block) => {
+                self.handle_block(block, Some(peer));
+            }
             Message::SendCmpct {
                 high_bandwidth,
                 version,
@@ -1170,7 +1319,10 @@ impl Core {
 
     // --------------------------------------------------------------- blocks
 
-    fn handle_block(&mut self, block: Block, source: Option<PeerId>) {
+    /// Submits `block` and any orphans it connects. Returns what happened to
+    /// `block` itself.
+    fn handle_block(&mut self, block: Block, source: Option<PeerId>) -> BlockVerdict {
+        let mut verdict = None;
         let mut queue = VecDeque::from([(block, source)]);
         while let Some((block, source)) = queue.pop_front() {
             let id = block.id();
@@ -1181,7 +1333,18 @@ impl Core {
                 peer.last_block = Some(Instant::now());
             }
             let tip_before = self.chain.tip();
-            match self.chain.submit_block(&block, unix_now()) {
+            let result = self.chain.submit_block(&block, unix_now());
+            if verdict.is_none() {
+                verdict = Some(match &result {
+                    Ok(outcome) => BlockVerdict::Accepted(*outcome),
+                    Err(ChainError::UnknownParent(_)) => BlockVerdict::Orphan,
+                    Err(ChainError::Consensus(ConsensusError::TimestampInFuture)) => {
+                        BlockVerdict::Deferred
+                    }
+                    Err(error) => BlockVerdict::Rejected(error.to_string()),
+                });
+            }
+            match result {
                 Ok(outcome) => {
                     if let Some(entry) = self.chain.entry(&id) {
                         self.tree
@@ -1217,7 +1380,7 @@ impl Core {
                 }
                 Err(ChainError::Consensus(ConsensusError::TimestampInFuture)) => {}
                 Err(ChainError::Storage(error)) => {
-                    eprintln!("[itacoin-net] storage failure: {error}");
+                    tracing::error!("storage failure: {error}");
                 }
                 Err(
                     ChainError::InvalidBlock { block_id, .. }
@@ -1239,6 +1402,7 @@ impl Core {
             }
         }
         self.request_blocks();
+        verdict.unwrap_or(BlockVerdict::Deferred)
     }
 
     /// Copies the chain's invalid marks into the header tree for `from` and

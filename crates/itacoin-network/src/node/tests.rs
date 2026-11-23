@@ -13,7 +13,6 @@ use tokio::{
 use super::*;
 use crate::{
     message::Command,
-    template,
     transport::{FrameReader, FrameWriter},
 };
 
@@ -43,7 +42,9 @@ async fn node(directory: &tempfile::TempDir) -> NodeHandle {
 
 async fn mine(node: &NodeHandle, payout: WalletId) -> Block {
     let block = node
-        .call(move |core| template::build_block(&core.chain, &core.mempool, payout, unix_now()))
+        .call(move |core| {
+            itacoin_miner::build_block(&core.chain, &core.mempool, payout, unix_now()).unwrap()
+        })
         .await
         .unwrap();
     node.submit_block(block.clone()).await;
@@ -365,12 +366,13 @@ async fn an_invalid_block_disconnects_and_discourages() {
     // A block whose coinbase claims one satoshi more than the subsidy.
     let honest = a
         .call(|core| {
-            template::build_block(
+            itacoin_miner::build_block(
                 &core.chain,
                 &core.mempool,
                 WalletId::new(Hash256::new([1; 32])),
                 unix_now(),
             )
+            .unwrap()
         })
         .await
         .unwrap();

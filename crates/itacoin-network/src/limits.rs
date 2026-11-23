@@ -65,6 +65,19 @@ impl Discouraged {
         self.until.get(ip).is_some_and(|until| *until > now)
     }
 
+    /// Currently discouraged IPs and the time left for each.
+    #[must_use]
+    pub fn list(&self, now: Instant) -> Vec<(IpAddr, Duration)> {
+        let mut list: Vec<(IpAddr, Duration)> = self
+            .until
+            .iter()
+            .filter(|(_, until)| **until > now)
+            .map(|(ip, until)| (*ip, until.duration_since(now)))
+            .collect();
+        list.sort();
+        list
+    }
+
     /// Forgets expired entries.
     pub fn expire(&mut self, now: Instant) {
         self.until.retain(|_, until| *until > now);

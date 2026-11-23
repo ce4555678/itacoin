@@ -16,7 +16,7 @@ use core::fmt;
 use std::collections::{HashMap, HashSet};
 
 use itacoin_codec::{Decode, Encode, Reader, Writer};
-use itacoin_primitives::{Amount, AmountError, BlockId, Hash256};
+use itacoin_primitives::{Amount, AmountError, BlockId, Hash256, WalletId};
 use itacoin_transaction::{
     OUTPOINT_BYTES, OUTPUT_BYTES, OutPoint, Output, Transaction, TransactionError,
 };
@@ -78,9 +78,13 @@ pub struct Tip {
 }
 
 /// The set of unspent outputs at a chain tip.
+///
+/// It also keeps an index from each `wallet_id` to its outpoints, derived
+/// from the coins and never stored, for wallet queries over RPC.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct UtxoSet {
     coins: HashMap<OutPoint, Coin>,
+    by_wallet: HashMap<WalletId, HashSet<OutPoint>>,
     total_value: Amount,
     tip: Option<Tip>,
 }
@@ -108,11 +112,44 @@ impl UtxoSet {
             .values()
             .map(|coin| u128::from(coin.output.amount.as_satoshis()))
             .sum();
+        let mut by_wallet: HashMap<WalletId, HashSet<OutPoint>> = HashMap::new();
+        for (outpoint, coin) in &coins {
+            by_wallet
+                .entry(coin.output.wallet_id)
+                .or_default()
+                .insert(*outpoint);
+        }
         Ok(Self {
             coins,
+            by_wallet,
             total_value: to_amount(total)?,
             tip,
         })
+    }
+
+    /// Iterates over the unspent outpoints paying `wallet_id`, in no
+    /// particular order.
+    pub fn outpoints_of(&self, wallet_id: &WalletId) -> impl Iterator<Item = &OutPoint> {
+        self.by_wallet.get(wallet_id).into_iter().flatten()
+    }
+
+    fn insert_coin(&mut self, outpoint: OutPoint, coin: Coin) {
+        self.by_wallet
+            .entry(coin.output.wallet_id)
+            .or_default()
+            .insert(outpoint);
+        self.coins.insert(outpoint, coin);
+    }
+
+    fn remove_coin(&mut self, outpoint: &OutPoint) {
+        if let Some(coin) = self.coins.remove(outpoint)
+            && let Some(set) = self.by_wallet.get_mut(&coin.output.wallet_id)
+        {
+            set.remove(outpoint);
+            if set.is_empty() {
+                self.by_wallet.remove(&coin.output.wallet_id);
+            }
+        }
     }
 
     /// Iterates over all unspent outputs, in no particular order.
@@ -281,9 +318,11 @@ impl UtxoSet {
 
         // Commit. Nothing below can fail.
         for (outpoint, _) in &spent_from_set {
-            self.coins.remove(outpoint);
+            self.remove_coin(outpoint);
         }
-        self.coins.extend(created);
+        for (outpoint, coin) in created {
+            self.insert_coin(outpoint, coin);
+        }
         self.total_value = total;
         let block_id = block.id();
         self.tip = Some(Tip { block_id, height });
@@ -318,9 +357,11 @@ impl UtxoSet {
         let total = to_amount(total)?;
 
         for outpoint in &created {
-            self.coins.remove(outpoint);
+            self.remove_coin(outpoint);
         }
-        self.coins.extend(undo.spent.iter().copied());
+        for (outpoint, coin) in &undo.spent {
+            self.insert_coin(*outpoint, *coin);
+        }
         self.total_value = total;
         self.tip = block.height().checked_sub(1).map(|height| Tip {
             block_id: block.header().prev_block,

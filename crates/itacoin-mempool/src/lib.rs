@@ -114,6 +114,16 @@ impl Entry {
         self.time
     }
 
+    /// Returns the unconfirmed transactions this one spends from.
+    pub fn parents(&self) -> impl Iterator<Item = &TransactionId> {
+        self.parents.iter()
+    }
+
+    /// Returns the unconfirmed transactions that spend from this one.
+    pub fn children(&self) -> impl Iterator<Item = &TransactionId> {
+        self.children.iter()
+    }
+
     /// Returns the fee rate as a comparable fraction `(fee, size)`.
     fn fee_rate(&self) -> FeeRate {
         FeeRate::new(self.fee.as_satoshis(), self.size)
