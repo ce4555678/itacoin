@@ -6,10 +6,10 @@ O workspace implementa primitivas monetárias, endereços Bech32m com checksum,
 hashes BLAKE3 com separação de domínio, Merkle tree no formato RFC 6962,
 assinaturas ML-DSA-65 hedged e vinculadas a um domínio, uma carteira local
 criptografada com arquivo autenticado e proteção contra rollback, e o
-[codec canônico](docs/CODEC_PROPOSAL.md) de transações e blocos, com a
-validação que não depende do estado da cadeia.
-Ele não implementa UTXO set, consenso, mineração, rede, RPC ou regras de
-emissão. Não está pronto para produção ou para guardar fundos reais.
+[codec canônico](docs/CODEC_PROPOSAL.md) de transações e blocos, e um UTXO
+set em memória que aplica e reverte blocos de forma atômica.
+Ele não implementa persistência, prova de trabalho, mineração, rede, RPC ou
+regras de emissão. Não está pronto para produção ou para guardar fundos reais.
 
 ## Segurança e compatibilidade
 

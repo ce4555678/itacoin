@@ -13,6 +13,10 @@ use itacoin_crypto::{CryptoError, block_hash, merkle_root};
 use itacoin_primitives::{BlockId, Hash256};
 use itacoin_transaction::{MIN_TX_BYTES, Transaction, TransactionError};
 
+pub mod utxo;
+
+pub use utxo::{BlockRules, BlockUndo, Coin, Tip, UtxoError, UtxoSet};
+
 /// The only block version this release accepts.
 pub const BLOCK_VERSION: u16 = 1;
 /// Encoded size of a [`BlockHeader`].
