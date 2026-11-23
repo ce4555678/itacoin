@@ -15,8 +15,11 @@
 use core::fmt;
 use std::collections::{HashMap, HashSet};
 
+use itacoin_codec::{Decode, Encode, Reader, Writer};
 use itacoin_primitives::{Amount, AmountError, BlockId, Hash256};
-use itacoin_transaction::{OutPoint, Output, Transaction, TransactionError};
+use itacoin_transaction::{
+    OUTPOINT_BYTES, OUTPUT_BYTES, OutPoint, Output, Transaction, TransactionError,
+};
 
 use crate::Block;
 
@@ -87,6 +90,34 @@ impl UtxoSet {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Rebuilds a set from stored coins and its tip.
+    ///
+    /// The total is recomputed from the coins and must not exceed the
+    /// maximum supply.
+    pub fn from_parts(
+        coins: impl IntoIterator<Item = (OutPoint, Coin)>,
+        tip: Option<Tip>,
+    ) -> Result<Self, UtxoError> {
+        let coins: HashMap<OutPoint, Coin> = coins.into_iter().collect();
+        if tip.is_none() && !coins.is_empty() {
+            return Err(UtxoError::CorruptUndo);
+        }
+        let total: u128 = coins
+            .values()
+            .map(|coin| u128::from(coin.output.amount.as_satoshis()))
+            .sum();
+        Ok(Self {
+            coins,
+            total_value: to_amount(total)?,
+            tip,
+        })
+    }
+
+    /// Iterates over all unspent outputs, in no particular order.
+    pub fn coins(&self) -> impl Iterator<Item = (&OutPoint, &Coin)> {
+        self.coins.iter()
     }
 
     /// Looks up an unspent output.
@@ -271,27 +302,7 @@ impl UtxoSet {
             return Err(UtxoError::NotTip(block_id));
         }
 
-        // Outputs the block created and that are still unspent. Outputs both
-        // created and spent inside the block never reached the set.
-        let spent_inside: HashSet<OutPoint> = block
-            .transactions()
-            .iter()
-            .flat_map(Transaction::inputs)
-            .map(|input| input.previous_output)
-            .collect();
-        let mut created = Vec::new();
-        for transaction in block.transactions() {
-            let txid = transaction.txid();
-            for index in 0..transaction.outputs().len() {
-                let outpoint = OutPoint {
-                    txid,
-                    index: u16::try_from(index).expect("output count fits in u16"),
-                };
-                if !spent_inside.contains(&outpoint) {
-                    created.push(outpoint);
-                }
-            }
-        }
+        let created = created_outpoints(block);
 
         let mut total = u128::from(self.total_value.as_satoshis());
         for outpoint in &created {
@@ -317,6 +328,94 @@ impl UtxoSet {
         });
         debug_assert_eq!(self.audit(), Ok(()));
         Ok(())
+    }
+}
+
+/// Returns the outputs `block` adds to the set: all of its outputs except
+/// those spent later in the same block, which never reach the set.
+#[must_use]
+pub fn created_outpoints(block: &Block) -> Vec<OutPoint> {
+    let spent_inside: HashSet<OutPoint> = block
+        .transactions()
+        .iter()
+        .flat_map(Transaction::inputs)
+        .map(|input| input.previous_output)
+        .collect();
+    let mut created = Vec::new();
+    for transaction in block.transactions() {
+        let txid = transaction.txid();
+        for index in 0..transaction.outputs().len() {
+            let outpoint = OutPoint {
+                txid,
+                index: u16::try_from(index).expect("output count fits in u16"),
+            };
+            if !spent_inside.contains(&outpoint) {
+                created.push(outpoint);
+            }
+        }
+    }
+    created
+}
+
+/// Encoded size of a [`Coin`].
+pub const COIN_BYTES: usize = OUTPUT_BYTES + 8 + 1;
+
+impl Encode for Coin {
+    fn encode(&self, writer: &mut Writer) {
+        self.output.encode(writer);
+        writer.u64(self.height);
+        writer.u8(u8::from(self.is_coinbase));
+    }
+
+    fn encoded_len(&self) -> usize {
+        COIN_BYTES
+    }
+}
+
+impl Decode for Coin {
+    type Error = TransactionError;
+
+    fn decode(reader: &mut Reader<'_>) -> Result<Self, TransactionError> {
+        let output = Output::decode(reader)?;
+        let height = reader.u64()?;
+        let is_coinbase = match reader.u8()? {
+            0 => false,
+            1 => true,
+            flag => return Err(TransactionError::UnknownKind(flag)),
+        };
+        Ok(Self {
+            output,
+            height,
+            is_coinbase,
+        })
+    }
+}
+
+impl Encode for BlockUndo {
+    fn encode(&self, writer: &mut Writer) {
+        self.block_id.encode(writer);
+        writer.count_u32(self.spent.len());
+        for (outpoint, coin) in &self.spent {
+            outpoint.encode(writer);
+            coin.encode(writer);
+        }
+    }
+
+    fn encoded_len(&self) -> usize {
+        32 + 4 + self.spent.len() * (OUTPOINT_BYTES + COIN_BYTES)
+    }
+}
+
+impl Decode for BlockUndo {
+    type Error = TransactionError;
+
+    fn decode(reader: &mut Reader<'_>) -> Result<Self, TransactionError> {
+        let block_id = BlockId::decode(reader)?;
+        let count = reader.count_u32(0..=usize::MAX, OUTPOINT_BYTES + COIN_BYTES)?;
+        let spent = (0..count)
+            .map(|_| Ok((OutPoint::decode(reader)?, Coin::decode(reader)?)))
+            .collect::<Result<Vec<_>, TransactionError>>()?;
+        Ok(Self { block_id, spent })
     }
 }
 

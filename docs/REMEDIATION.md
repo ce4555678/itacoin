@@ -16,7 +16,7 @@ O relatório de auditoria é mantido como registro histórico e não é editado.
 | V-09 | Entradas sem limite de tamanho | **Corrigido**: `merkle_root` limitado a 2^20 folhas; o codec recusa transações acima de `MAX_TX_BYTES` e blocos acima de `MAX_BLOCK_BYTES` antes de decodificar, e confere cada contagem contra os bytes restantes antes de alocar. Os valores dos limites são provisórios | `MAX_MERKLE_LEAVES`, `itacoin-codec`, `itacoin-transaction`, `itacoin-blockchain` |
 | I-01 | `PublicKey::from_bytes` valida só comprimento | Documentado; prova de posse fica para o consenso | `docs/SECURITY.md` |
 | I-02 | Vetores ACVP incompletos | **Corrigido**: `keyGen` (2 casos), `sigGen` determinístico e hedged (30 casos, comparação byte a byte) e `sigVer` (15 casos, 3 válidos e 12 inválidos) de ML-DSA-65, interface `external`/`pure` | `itacoin-crypto::mldsa`, `crates/itacoin-crypto/vectors/` |
-| I-03 | Limite de `Amount` não é invariante de suprimento | **Corrigido em memória**: `UtxoSet` mantém o valor total dos UTXOs, atualizado em `u128` e limitado a `MAX_SUPPLY` a cada bloco aplicado e revertido, e `audit()` reconta as moedas. Falta persistir o estado (`itacoin-storage`) | `itacoin-blockchain::utxo` |
+| I-03 | Limite de `Amount` não é invariante de suprimento | **Corrigido**: `UtxoSet` mantém o valor total dos UTXOs, atualizado em `u128` e limitado a `MAX_SUPPLY` a cada bloco aplicado e revertido, e `audit()` reconta as moedas. `ChainStore` persiste o estado e o recalcula ao abrir | `itacoin-blockchain::utxo`, `itacoin-storage` |
 | I-04 | Sem Git, CI ou detecção de mudanças | **Corrigido**: commit inicial, `detect_changes` funcionando; CI com fmt, Clippy, testes, `cargo audit` e 60 s de fuzzing por alvo | `.github/workflows/ci.yml` |
 | I-05 | Duplicação de dependências | Aceito; versões fixadas e monitoradas pelo `cargo audit` | — |
 | P-07 | I/O de carteira | **Corrigido**: `0600`, escrita atômica, `fsync` de arquivo e diretório, sem sobrescrita, e lock exclusivo entre processos em `.<nome>.lock` durante `write_new`/`replace` (`WalletError::Locked`). MSRV passou para 1.89 por `File::try_lock` | `itacoin-wallet::storage` |
@@ -51,6 +51,8 @@ cargo +nightly fuzz run encrypted_wallet -- -max_total_time=60
 
 1. Aprovar a [emissão](EMISSION_PROPOSAL.md) e o intervalo de bloco, que
    fixam os limites provisórios do codec.
-2. Fase 4: `itacoin-storage` com aplicação e reversão atômicas em disco,
-   recuperação após queda e codificação de `BlockUndo`.
-3. Fuzzing contínuo (OSS-Fuzz ou execução longa agendada), além do job curto do CI.
+2. Fase 4: prova de trabalho, ajuste de dificuldade, timestamps e escolha
+   da cadeia por trabalho acumulado, com reorganização sobre `ChainStore`.
+3. `ChainStore` mantém todo o UTXO set em memória e guarda todos os blocos;
+   cache limitado e poda de testemunhas (requisito 1.9) ficam para depois.
+4. Fuzzing contínuo (OSS-Fuzz ou execução longa agendada), além do job curto do CI.

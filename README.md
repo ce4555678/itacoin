@@ -7,9 +7,10 @@ hashes BLAKE3 com separação de domínio, Merkle tree no formato RFC 6962,
 assinaturas ML-DSA-65 hedged e vinculadas a um domínio, uma carteira local
 criptografada com arquivo autenticado e proteção contra rollback, e o
 [codec canônico](docs/CODEC_PROPOSAL.md) de transações e blocos, e um UTXO
-set em memória que aplica e reverte blocos de forma atômica.
-Ele não implementa persistência, prova de trabalho, mineração, rede, RPC ou
-regras de emissão. Não está pronto para produção ou para guardar fundos reais.
+set que aplica e reverte blocos de forma atômica, persistido em disco com
+[redb](https://docs.rs/redb) e resistente a quedas do processo.
+Ele não implementa prova de trabalho, mineração, rede, RPC ou regras de
+emissão. Não está pronto para produção ou para guardar fundos reais.
 
 ## Segurança e compatibilidade
 
@@ -54,5 +55,5 @@ esse valor antes de ser incorporada ao consenso.
 ## Escopo futuro reservado
 
 Os diretórios para os demais componentes são reservados para etapas futuras:
-`itacoin-consensus`, `itacoin-storage`, `itacoin-network`, `itacoin-miner`,
+`itacoin-consensus`, `itacoin-network`, `itacoin-miner`,
 `itacoin-rpc` e `itacoin-node`.

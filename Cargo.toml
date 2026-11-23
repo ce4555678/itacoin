@@ -6,13 +6,14 @@ members = [
     "crates/itacoin-codec",
     "crates/itacoin-transaction",
     "crates/itacoin-blockchain",
+    "crates/itacoin-storage",
 ]
 resolver = "2"
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.89"
+rust-version = "1.90"
 license = "Apache-2.0 OR MIT"
 repository = "https://github.com/itacoin/itacoin"
 
@@ -27,6 +28,7 @@ blake3 = "=1.8.2"
 chacha20poly1305 = { version = "=0.10.1", default-features = false, features = ["std", "getrandom"] }
 ml-dsa = { version = "=0.1.2", default-features = false, features = ["alloc", "getrandom", "zeroize"] }
 rand_core = { version = "=0.6.4", features = ["getrandom"] }
+redb = "=4.4.0"
 zeroize = { version = "=1.8.2", features = ["derive"] }
 
 # Argon2id and ML-DSA are prohibitively slow without optimization, which would

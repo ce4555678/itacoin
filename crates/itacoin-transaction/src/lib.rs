@@ -452,10 +452,34 @@ fn decode_outputs(reader: &mut Reader<'_>) -> Result<Vec<Output>, TransactionErr
     (0..count).map(|_| Output::decode(reader)).collect()
 }
 
+/// Encoded size of an [`OutPoint`].
+pub const OUTPOINT_BYTES: usize = 32 + 2;
+
+impl Encode for OutPoint {
+    fn encode(&self, writer: &mut Writer) {
+        self.txid.encode(writer);
+        writer.u16(self.index);
+    }
+
+    fn encoded_len(&self) -> usize {
+        OUTPOINT_BYTES
+    }
+}
+
+impl Decode for OutPoint {
+    type Error = CodecError;
+
+    fn decode(reader: &mut Reader<'_>) -> Result<Self, CodecError> {
+        Ok(Self {
+            txid: TransactionId::decode(reader)?,
+            index: reader.u16()?,
+        })
+    }
+}
+
 impl Encode for Input {
     fn encode(&self, writer: &mut Writer) {
-        self.previous_output.txid.encode(writer);
-        writer.u16(self.previous_output.index);
+        self.previous_output.encode(writer);
         writer.u16(self.witness_index);
     }
 
@@ -469,10 +493,7 @@ impl Decode for Input {
 
     fn decode(reader: &mut Reader<'_>) -> Result<Self, CodecError> {
         Ok(Self {
-            previous_output: OutPoint {
-                txid: TransactionId::decode(reader)?,
-                index: reader.u16()?,
-            },
+            previous_output: OutPoint::decode(reader)?,
             witness_index: reader.u16()?,
         })
     }

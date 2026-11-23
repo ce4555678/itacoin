@@ -15,7 +15,9 @@ use itacoin_transaction::{MIN_TX_BYTES, Transaction, TransactionError};
 
 pub mod utxo;
 
-pub use utxo::{BlockRules, BlockUndo, Coin, Tip, UtxoError, UtxoSet};
+pub use utxo::{
+    BlockRules, BlockUndo, COIN_BYTES, Coin, Tip, UtxoError, UtxoSet, created_outpoints,
+};
 
 /// The only block version this release accepts.
 pub const BLOCK_VERSION: u16 = 1;

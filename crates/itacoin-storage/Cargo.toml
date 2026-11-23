@@ -1,0 +1,22 @@
+[package]
+name = "itacoin-storage"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Durable, crash-safe ITACOIN chain state."
+
+[dependencies]
+itacoin-blockchain = { path = "../itacoin-blockchain" }
+itacoin-codec = { path = "../itacoin-codec" }
+itacoin-primitives = { path = "../itacoin-primitives" }
+itacoin-transaction = { path = "../itacoin-transaction" }
+redb.workspace = true
+
+[dev-dependencies]
+itacoin-crypto = { path = "../itacoin-crypto" }
+tempfile = "=3.27.0"
+
+[lints]
+workspace = true
