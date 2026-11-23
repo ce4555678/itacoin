@@ -1,4 +1,11 @@
-# Proposta de emissão — aguardando aprovação
+# Emissão — aprovada
+
+> Aprovada em 2026-11-23 junto com a [proposta de consenso](CONSENSUS_PROPOSAL.md),
+> que fixou `N = 262.800` blocos, o gênese queimado e o destino das taxas.
+> Implementada em `itacoin_consensus::subsidy`, com teste que soma todas as
+> recompensas e exige igualdade exata com `MAX_SUPPLY`.
+>
+> O texto abaixo é a proposta original.
 
 > Esta é uma proposta matemática, não uma regra de consenso nem uma política
 > econômica aprovada. Nenhum código desta primeira etapa a implementa.

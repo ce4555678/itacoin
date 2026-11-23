@@ -6,6 +6,7 @@ members = [
     "crates/itacoin-codec",
     "crates/itacoin-transaction",
     "crates/itacoin-blockchain",
+    "crates/itacoin-consensus",
     "crates/itacoin-storage",
 ]
 resolver = "2"

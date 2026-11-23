@@ -1,0 +1,18 @@
+[package]
+name = "itacoin-consensus"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "ITACOIN consensus rules: emission, proof of work, difficulty and chain work."
+
+[dependencies]
+argon2.workspace = true
+itacoin-blockchain = { path = "../itacoin-blockchain" }
+itacoin-codec = { path = "../itacoin-codec" }
+itacoin-primitives = { path = "../itacoin-primitives" }
+itacoin-transaction = { path = "../itacoin-transaction" }
+
+[lints]
+workspace = true

@@ -13,7 +13,7 @@ O relatório de auditoria é mantido como registro histórico e não é editado.
 | V-06 | Senha e KDF fracos | **Corrigido**: senha de 12 a 1024 bytes; Argon2id 64 MiB/3/4 por padrão, parâmetros autenticados e limitados | `Password`, `KdfParams` |
 | V-07 | Segredos residuais em memória | **Parcial**: `Password` e `to_seed` zeroizáveis. `mlock` e desabilitação de core dump são política do processo e exigem `unsafe`/libc, que o workspace proíbe; ficam para o binário (`itacoin-node` ou CLI da carteira), que deve chamar `setrlimit(RLIMIT_CORE, 0)` e `prctl(PR_SET_DUMPABLE, 0)` ao iniciar | `itacoin-wallet`, `itacoin-crypto` |
 | V-08 | Endereço sem checksum; `wallet_id` aceita bytes arbitrários | **Corrigido**: `Address` Bech32m versionado por rede; `wallet_id` exige `PublicKey` | `itacoin-primitives::Address` |
-| V-09 | Entradas sem limite de tamanho | **Corrigido**: `merkle_root` limitado a 2^20 folhas; o codec recusa transações acima de `MAX_TX_BYTES` e blocos acima de `MAX_BLOCK_BYTES` antes de decodificar, e confere cada contagem contra os bytes restantes antes de alocar. Os valores dos limites são provisórios | `MAX_MERKLE_LEAVES`, `itacoin-codec`, `itacoin-transaction`, `itacoin-blockchain` |
+| V-09 | Entradas sem limite de tamanho | **Corrigido**: `merkle_root` limitado a 2^20 folhas; o codec recusa transações acima de `MAX_TX_BYTES` e blocos acima de `MAX_BLOCK_BYTES` antes de decodificar, e confere cada contagem contra os bytes restantes antes de alocar. Valores fixados pela proposta de consenso: 1 MB e 200 verificações por bloco | `MAX_MERKLE_LEAVES`, `itacoin-codec`, `itacoin-transaction`, `itacoin-blockchain` |
 | I-01 | `PublicKey::from_bytes` valida só comprimento | Documentado; prova de posse fica para o consenso | `docs/SECURITY.md` |
 | I-02 | Vetores ACVP incompletos | **Corrigido**: `keyGen` (2 casos), `sigGen` determinístico e hedged (30 casos, comparação byte a byte) e `sigVer` (15 casos, 3 válidos e 12 inválidos) de ML-DSA-65, interface `external`/`pure` | `itacoin-crypto::mldsa`, `crates/itacoin-crypto/vectors/` |
 | I-03 | Limite de `Amount` não é invariante de suprimento | **Corrigido**: `UtxoSet` mantém o valor total dos UTXOs, atualizado em `u128` e limitado a `MAX_SUPPLY` a cada bloco aplicado e revertido, e `audit()` reconta as moedas. `ChainStore` persiste o estado e o recalcula ao abrir | `itacoin-blockchain::utxo`, `itacoin-storage` |
@@ -49,10 +49,10 @@ cargo +nightly fuzz run encrypted_wallet -- -max_total_time=60
 
 ## Próximos passos
 
-1. Aprovar a [emissão](EMISSION_PROPOSAL.md) e o intervalo de bloco, que
-   fixam os limites provisórios do codec.
-2. Fase 4: prova de trabalho, ajuste de dificuldade, timestamps e escolha
-   da cadeia por trabalho acumulado, com reorganização sobre `ChainStore`.
+1. Fase 5: rede P2P com threat model (Sybil, eclipse, flooding), limites de
+   conexão e de mensagem, pool de órfãos e propagação por *compact blocks*.
+2. Mineração (`itacoin-miner`), RPC e o binário `itacoin-node`, que também
+   deve aplicar as proteções de processo do V-07.
 3. `ChainStore` mantém todo o UTXO set em memória e guarda todos os blocos;
    cache limitado e poda de testemunhas (requisito 1.9) ficam para depois.
 4. Fuzzing contínuo (OSS-Fuzz ou execução longa agendada), além do job curto do CI.

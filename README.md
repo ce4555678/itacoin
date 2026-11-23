@@ -6,11 +6,12 @@ O workspace implementa primitivas monetárias, endereços Bech32m com checksum,
 hashes BLAKE3 com separação de domínio, Merkle tree no formato RFC 6962,
 assinaturas ML-DSA-65 hedged e vinculadas a um domínio, uma carteira local
 criptografada com arquivo autenticado e proteção contra rollback, e o
-[codec canônico](docs/CODEC_PROPOSAL.md) de transações e blocos, e um UTXO
-set que aplica e reverte blocos de forma atômica, persistido em disco com
-[redb](https://docs.rs/redb) e resistente a quedas do processo.
-Ele não implementa prova de trabalho, mineração, rede, RPC ou regras de
-emissão. Não está pronto para produção ou para guardar fundos reais.
+[codec canônico](docs/CODEC_PROPOSAL.md) de transações e blocos, um UTXO set
+persistido com [redb](https://docs.rs/redb) e resistente a quedas, e as regras
+de [consenso](docs/CONSENSUS_PROPOSAL.md): emissão, prova de trabalho Argon2id,
+dificuldade aserti3-2d, timestamps e escolha da cadeia de maior trabalho com
+reorganização.
+Ele não implementa rede, mineração, RPC nem um binário de nó. Não está pronto para produção ou para guardar fundos reais.
 
 ## Segurança e compatibilidade
 
@@ -47,13 +48,12 @@ cargo test --workspace --all-targets
 ## Emissão
 
 `MAX_SUPPLY` representa exatamente 100.000.000 ITC (10.000.000.000.000.000
-unidades mínimas). Há uma [proposta de curva de emissão](docs/EMISSION_PROPOSAL.md)
-matematicamente exata, mas ela aguarda aprovação e não foi implementada. Qualquer
-curva deve provar, por soma inteira de todas as recompensas, que não ultrapassa
-esse valor antes de ser incorporada ao consenso.
+unidades mínimas). A [curva de emissão](docs/EMISSION_PROPOSAL.md) é linear decrescente em 100
+eras de 262.800 blocos (≈ 100 anos), e um teste soma todas as recompensas e
+exige igualdade exata com esse valor.
 
 ## Escopo futuro reservado
 
 Os diretórios para os demais componentes são reservados para etapas futuras:
-`itacoin-consensus`, `itacoin-network`, `itacoin-miner`,
+`itacoin-network`, `itacoin-miner`,
 `itacoin-rpc` e `itacoin-node`.

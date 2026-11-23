@@ -346,6 +346,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "itacoin-consensus"
+version = "0.1.0"
+dependencies = [
+ "argon2",
+ "itacoin-blockchain",
+ "itacoin-codec",
+ "itacoin-primitives",
+ "itacoin-transaction",
+]
+
+[[package]]
 name = "itacoin-crypto"
 version = "0.1.0"
 dependencies = [
@@ -368,6 +379,7 @@ version = "0.1.0"
 dependencies = [
  "itacoin-blockchain",
  "itacoin-codec",
+ "itacoin-consensus",
  "itacoin-crypto",
  "itacoin-primitives",
  "itacoin-transaction",

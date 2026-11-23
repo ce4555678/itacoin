@@ -10,6 +10,7 @@ description = "Durable, crash-safe ITACOIN chain state."
 [dependencies]
 itacoin-blockchain = { path = "../itacoin-blockchain" }
 itacoin-codec = { path = "../itacoin-codec" }
+itacoin-consensus = { path = "../itacoin-consensus" }
 itacoin-primitives = { path = "../itacoin-primitives" }
 itacoin-transaction = { path = "../itacoin-transaction" }
 redb.workspace = true

@@ -34,6 +34,9 @@ const BLOCKS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("blocks");
 const UNDO: TableDefinition<&[u8], &[u8]> = TableDefinition::new("undo");
 /// The current chain: height → block id.
 const HEIGHTS: TableDefinition<u64, &[u8]> = TableDefinition::new("heights");
+/// Header index, including side chains: block id → index entry, encoded by
+/// [`chain`].
+const HEADERS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("headers");
 /// Store metadata: schema version, chain id and tip.
 const META: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
 
@@ -46,8 +49,9 @@ pub struct ChainStore {
     db: Database,
     chain_id: Hash256,
     utxo: UtxoSet,
+    /// Number of commits to let through before failing one (tests only).
     #[cfg(test)]
-    fail_next_commit: bool,
+    fail_commit_in: Option<usize>,
 }
 
 impl ChainStore {
@@ -56,7 +60,10 @@ impl ChainStore {
     /// Fails if the file belongs to another chain or schema version, or if its
     /// contents are inconsistent. Only one process can hold the store open.
     pub fn open(path: &Path, chain_id: Hash256) -> Result<Self, StorageError> {
-        let db = Database::create(path).map_err(database)?;
+        if !path.exists() {
+            create_atomically(path)?;
+        }
+        let db = Database::open(path).map_err(database)?;
         let write = db.begin_write().map_err(database)?;
         {
             let mut meta = write.open_table(META).map_err(database)?;
@@ -99,6 +106,7 @@ impl ChainStore {
             write.open_table(BLOCKS).map_err(database)?;
             write.open_table(UNDO).map_err(database)?;
             write.open_table(HEIGHTS).map_err(database)?;
+            write.open_table(HEADERS).map_err(database)?;
         }
         write.commit().map_err(database)?;
 
@@ -108,7 +116,7 @@ impl ChainStore {
             chain_id,
             utxo,
             #[cfg(test)]
-            fail_next_commit: false,
+            fail_commit_in: None,
         })
     }
 
@@ -195,6 +203,52 @@ impl ChainStore {
         } else {
             Err(StorageError::Corrupt("memory and disk disagree"))
         }
+    }
+
+    /// Durably stores a block and its header-index entry, without applying it.
+    pub fn store_block(&mut self, block: &Block, index_entry: &[u8]) -> Result<(), StorageError> {
+        let key = block.id();
+        let write = self.db.begin_write().map_err(database)?;
+        write
+            .open_table(BLOCKS)
+            .map_err(database)?
+            .insert(key.as_bytes().as_slice(), block.to_bytes().as_slice())
+            .map_err(database)?;
+        write
+            .open_table(HEADERS)
+            .map_err(database)?
+            .insert(key.as_bytes().as_slice(), index_entry)
+            .map_err(database)?;
+        self.commit(write)
+    }
+
+    /// Durably replaces header-index entries in one transaction.
+    pub fn store_index_entries(
+        &mut self,
+        entries: &[(BlockId, Vec<u8>)],
+    ) -> Result<(), StorageError> {
+        let write = self.db.begin_write().map_err(database)?;
+        {
+            let mut headers = write.open_table(HEADERS).map_err(database)?;
+            for (id, entry) in entries {
+                headers
+                    .insert(id.as_bytes().as_slice(), entry.as_slice())
+                    .map_err(database)?;
+            }
+        }
+        self.commit(write)
+    }
+
+    /// Returns every header-index entry.
+    pub fn index_entries(&self) -> Result<Vec<(BlockId, Vec<u8>)>, StorageError> {
+        let read = self.db.begin_read().map_err(database)?;
+        let headers = read.open_table(HEADERS).map_err(database)?;
+        let mut entries = Vec::new();
+        for entry in headers.iter().map_err(database)? {
+            let (key, value) = entry.map_err(database)?;
+            entries.push((block_id(key.value())?, value.value().to_vec()));
+        }
+        Ok(entries)
     }
 
     fn undo(&self, block_id: &BlockId) -> Result<BlockUndo, StorageError> {
@@ -285,10 +339,15 @@ impl ChainStore {
 
     fn commit(&mut self, write: WriteTransaction) -> Result<(), StorageError> {
         #[cfg(test)]
-        if std::mem::take(&mut self.fail_next_commit) {
-            // Dropping an uncommitted transaction aborts it.
-            drop(write);
-            return Err(StorageError::Corrupt("injected commit failure"));
+        match self.fail_commit_in {
+            Some(0) => {
+                self.fail_commit_in = None;
+                // Dropping an uncommitted transaction aborts it.
+                drop(write);
+                return Err(StorageError::Corrupt("injected commit failure"));
+            }
+            Some(remaining) => self.fail_commit_in = Some(remaining - 1),
+            None => {}
         }
         write.commit().map_err(database)
     }
@@ -311,6 +370,44 @@ impl fmt::Debug for ChainStore {
             .field("coins", &self.utxo.len())
             .finish_non_exhaustive()
     }
+}
+
+/// Creates an empty database at `path` so that a crash never leaves a
+/// half-initialized file there: it is built and committed under a temporary
+/// name in the same directory, then renamed into place. A stale temporary file
+/// from an earlier crash was never published and is discarded.
+fn create_atomically(path: &Path) -> Result<(), StorageError> {
+    let invalid_path = || StorageError::Corrupt("store path has no file name");
+    let mut temporary_name = std::ffi::OsString::from(".");
+    temporary_name.push(path.file_name().ok_or_else(invalid_path)?);
+    temporary_name.push(".creating");
+    let temporary = path.with_file_name(temporary_name);
+    let io = |error: std::io::Error| StorageError::Database(redb::Error::Io(error));
+
+    match std::fs::remove_file(&temporary) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(io(error)),
+        _ => {}
+    }
+    {
+        let db = Database::create(&temporary).map_err(database)?;
+        // An empty durable commit leaves a complete, synced redb file.
+        db.begin_write()
+            .map_err(database)?
+            .commit()
+            .map_err(database)?;
+    }
+    std::fs::rename(&temporary, path).map_err(io)?;
+    #[cfg(unix)]
+    {
+        let parent = match path.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent,
+            _ => Path::new("."),
+        };
+        std::fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(io)?;
+    }
+    Ok(())
 }
 
 fn set_tip(write: &WriteTransaction, tip: Option<Tip>) -> Result<(), StorageError> {
@@ -430,6 +527,10 @@ impl fmt::Display for StorageError {
 }
 
 impl std::error::Error for StorageError {}
+
+pub mod chain;
+
+pub use chain::{Chain, ChainError, IndexEntry, SubmitOutcome};
 
 #[cfg(test)]
 mod tests;

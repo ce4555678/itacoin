@@ -128,6 +128,23 @@ fn new_store_is_empty_and_bound_to_its_chain() {
 }
 
 #[test]
+fn creation_is_atomic_and_ignores_stale_temporaries() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("chain.redb");
+    // A crash during an earlier creation left garbage under the temporary
+    // name; nothing was published at `path`.
+    std::fs::write(directory.path().join(".chain.redb.creating"), b"garbage").unwrap();
+    let store = ChainStore::open(&path, CHAIN).unwrap();
+    assert_eq!(store.tip(), None);
+    drop(store);
+    let names: Vec<_> = std::fs::read_dir(directory.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(names, vec![std::ffi::OsString::from("chain.redb")]);
+}
+
+#[test]
 fn only_one_handle_can_open_the_store() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("chain.redb");
@@ -237,14 +254,14 @@ fn failed_commits_leave_disk_and_memory_consistent() {
     let block = next_block(&store, &key, 1, 1);
     let before = store.utxo().clone();
 
-    store.fail_next_commit = true;
+    store.fail_commit_in = Some(0);
     assert!(store.apply_block(&block, &rules()).is_err());
     assert_eq!(store.utxo(), &before);
     store.verify().unwrap();
 
     store.apply_block(&block, &rules()).unwrap();
     let after = store.utxo().clone();
-    store.fail_next_commit = true;
+    store.fail_commit_in = Some(0);
     assert!(store.revert_tip().is_err());
     assert_eq!(store.utxo(), &after);
     store.verify().unwrap();
@@ -312,7 +329,7 @@ fn survives_process_abort_mid_write() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("chain.redb");
     let mut heights = Vec::new();
-    for delay in [150, 300, 450, 600, 750, 900] {
+    for delay in [2, 10, 150, 300, 450, 600, 750, 900] {
         let status = Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",

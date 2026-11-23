@@ -2,8 +2,8 @@
 
 > Aprovado em 2026-11-23, com todos os pontos da seção 9, e implementado em
 > `itacoin-codec`, `itacoin-transaction` e `itacoin-blockchain` (achado P-01
-> da auditoria). Os valores dos limites da seção 5 são provisórios até a
-> aprovação do intervalo de bloco. Segue os requisitos de
+> da auditoria). Os limites de bloco da seção 5 foram fixados pela
+> [proposta de consenso](CONSENSUS_PROPOSAL.md): 1 MB e 200 verificações. Segue os requisitos de
 > [PROTOCOL_REQUIREMENTS.md](PROTOCOL_REQUIREMENTS.md).
 
 ## 1. Princípios
@@ -196,8 +196,8 @@ intervalo de bloco for aprovado junto com a [emissão](EMISSION_PROPOSAL.md).
 
 | Constante | Valor | Motivo |
 | --- | --- | --- |
-| `MAX_BLOCK_BYTES` | 2.000.000 | ~370 transações de 1 input; ~1 MB/min se o bloco for de 2 min |
-| `MAX_BLOCK_SIG_VERIFICATIONS` | 400 | ~140 ms de verificação em um núcleo (0,35 ms cada) |
+| `MAX_BLOCK_BYTES` | 1.000.000 | ~185 transações de 1 input por bloco de 120 s (antes 2.000.000, provisório) |
+| `MAX_BLOCK_SIG_VERIFICATIONS` | 200 | ~70 ms de verificação em um núcleo (antes 400, provisório) |
 | `MAX_TX_BYTES` | 100.000 | ~18 testemunhas; limita o custo de uma transação isolada na mempool |
 | `MAX_TX_INPUTS` | 1.000 | 36 KB de inputs; cabe com uma testemunha por carteira |
 | `MAX_TX_OUTPUTS` | 1.000 | 41 KB de outputs |
@@ -258,5 +258,5 @@ vir com:
 5. **Sem campo de dados livres** (memo/`OP_RETURN`) nesta versão.
 6. **Sem `lock_time`** nesta versão. Transações com validade a partir de uma
    altura ou hora exigem uma nova versão de transação.
-7. **Valores dos limites** da seção 5, provisórios: dependem do intervalo de bloco.
+7. **Valores dos limites** da seção 5, fixados pela proposta de consenso.
 8. **Versionamento fechado** (seção 7).

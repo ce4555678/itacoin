@@ -23,14 +23,12 @@ pub use utxo::{
 pub const BLOCK_VERSION: u16 = 1;
 /// Encoded size of a [`BlockHeader`].
 pub const HEADER_BYTES: usize = 2 + 32 + 32 + 32 + 8 + 32 + 8;
-/// Maximum encoded size of a block, header included.
-///
-/// Provisional: to be recalculated once the block interval is approved.
-pub const MAX_BLOCK_BYTES: usize = 2_000_000;
-/// Maximum number of ML-DSA verifications a block may require.
-///
-/// Provisional: to be recalculated once the block interval is approved.
-pub const MAX_BLOCK_SIG_VERIFICATIONS: usize = 400;
+/// Maximum encoded size of a block, header included (about 185 one-input
+/// transactions per 120-second block).
+pub const MAX_BLOCK_BYTES: usize = 1_000_000;
+/// Maximum number of ML-DSA verifications a block may require (about 70 ms
+/// on one core).
+pub const MAX_BLOCK_SIG_VERIFICATIONS: usize = 200;
 /// Largest transaction count that can fit in [`MAX_BLOCK_BYTES`].
 pub const MAX_BLOCK_TRANSACTIONS: usize = (MAX_BLOCK_BYTES - HEADER_BYTES - 4) / MIN_TX_BYTES;
 
