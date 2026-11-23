@@ -4,15 +4,20 @@
 //! keys and XChaCha20-Poly1305. It has no recovery phrase support: a backup of
 //! the encrypted bytes and its password are both required for recovery.
 //!
-//! # File format `ITCW` version 2
+//! # File format `ITCW` versions 2 and 3
 //!
 //! ```text
-//! magic "ITCW" (4) || version = 2 (1)
+//! magic "ITCW" (4) || version = 2 or 3 (1)
 //! || argon2 memory KiB (u32 BE) || argon2 passes (u32 BE) || argon2 lanes (u32 BE)
 //! || salt (16) || XChaCha20 nonce (24)
-//! || wallet id (32) || generation (u64 BE)
+//! || identity (32) || generation (u64 BE)
 //! || ciphertext + Poly1305 tag (48)
 //! ```
+//!
+//! Version 2 holds the seed of a single key, and its identity is that key's
+//! wallet id. Version 3 holds a [`MasterSecret`] from which every key is
+//! derived (see `docs/WALLET_PROPOSAL.md`), and its identity is the secret's
+//! fingerprint, which reveals no address.
 //!
 //! Every byte before the ciphertext is the AEAD associated data, so the KDF
 //! parameters, the wallet identity and the generation counter are all
@@ -31,10 +36,16 @@ use itacoin_primitives::{Address, Hash256, Network, WalletId};
 use rand_core::{OsRng, RngCore};
 use zeroize::Zeroizing;
 
+pub mod backup;
+pub mod builder;
+mod hd;
 mod storage;
+
+pub use hd::{Branch, MasterSecret, network_byte};
 
 const WALLET_FILE_MAGIC: [u8; 4] = *b"ITCW";
 const WALLET_FILE_VERSION: u8 = 2;
+const WALLET_FILE_VERSION_MASTER: u8 = 3;
 const SALT_BYTES: usize = 16;
 const NONCE_BYTES: usize = 24;
 const KEY_BYTES: usize = 32;
@@ -157,6 +168,16 @@ impl Wallet {
         })
     }
 
+    /// Gives up the wallet for its key pair, to sign transactions with
+    /// [`builder::Plan::sign`].
+    #[must_use]
+    pub fn into_key_pair(self) -> KeyPair {
+        KeyPair {
+            private_key: self.private_key,
+            public_key: self.public_key,
+        }
+    }
+
     /// Returns this wallet's ML-DSA-65 public key.
     #[must_use]
     pub fn public_key(&self) -> &PublicKey {
@@ -215,6 +236,50 @@ impl Wallet {
         generation: u64,
         kdf: KdfParams,
     ) -> Result<EncryptedWallet, WalletError> {
+        let seed = self.private_key.to_seed();
+        EncryptedWallet::seal(
+            WALLET_FILE_VERSION,
+            *self.wallet_id().as_bytes(),
+            &seed,
+            password,
+            generation,
+            kdf,
+        )
+    }
+}
+
+/// What an encrypted wallet file holds.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WalletKind {
+    /// Version 2: the seed of a single key.
+    SingleKey,
+    /// Version 3: a master secret from which keys are derived.
+    Master,
+}
+
+/// A versioned encrypted representation of a wallet's private signing seed.
+///
+/// See the crate documentation for the binary format.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EncryptedWallet {
+    version: u8,
+    kdf: KdfParams,
+    salt: [u8; SALT_BYTES],
+    nonce: [u8; NONCE_BYTES],
+    identity: [u8; WALLET_ID_BYTES],
+    generation: u64,
+    ciphertext: [u8; CIPHERTEXT_BYTES],
+}
+
+impl EncryptedWallet {
+    fn seal(
+        version: u8,
+        identity: [u8; WALLET_ID_BYTES],
+        secret: &[u8; KEY_BYTES],
+        password: &Password,
+        generation: u64,
+        kdf: KdfParams,
+    ) -> Result<Self, WalletError> {
         if !kdf.is_within_bounds() {
             return Err(WalletError::UnsupportedKdfParams);
         }
@@ -223,22 +288,22 @@ impl Wallet {
         OsRng.fill_bytes(&mut salt);
         OsRng.fill_bytes(&mut nonce);
 
-        let mut encrypted = EncryptedWallet {
+        let mut encrypted = Self {
+            version,
             kdf,
             salt,
             nonce,
-            wallet_id: self.wallet_id(),
+            identity,
             generation,
             ciphertext: [0; CIPHERTEXT_BYTES],
         };
         let key = derive_key(password, &salt, kdf)?;
         let cipher = XChaCha20Poly1305::new((&*key).into());
-        let seed = self.private_key.to_seed();
         let ciphertext = cipher
             .encrypt(
                 XNonce::from_slice(&nonce),
                 Payload {
-                    msg: &*seed,
+                    msg: secret,
                     aad: &encrypted.header(),
                 },
             )
@@ -248,29 +313,94 @@ impl Wallet {
             .map_err(|_| WalletError::EncryptionFailed)?;
         Ok(encrypted)
     }
-}
 
-/// A versioned encrypted representation of a wallet's private signing seed.
-///
-/// See the crate documentation for the binary format.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct EncryptedWallet {
-    kdf: KdfParams,
-    salt: [u8; SALT_BYTES],
-    nonce: [u8; NONCE_BYTES],
-    wallet_id: WalletId,
-    generation: u64,
-    ciphertext: [u8; CIPHERTEXT_BYTES],
-}
+    fn open(&self, password: &Password) -> Result<Zeroizing<[u8; KEY_BYTES]>, WalletError> {
+        let key = derive_key(password, &self.salt, self.kdf)?;
+        let cipher = XChaCha20Poly1305::new((&*key).into());
+        let plain = Zeroizing::new(
+            cipher
+                .decrypt(
+                    XNonce::from_slice(&self.nonce),
+                    Payload {
+                        msg: &self.ciphertext,
+                        aad: &self.header(),
+                    },
+                )
+                .map_err(|_| WalletError::DecryptionFailed)?,
+        );
+        let mut secret = Zeroizing::new([0_u8; KEY_BYTES]);
+        if plain.len() != KEY_BYTES {
+            return Err(WalletError::DecryptionFailed);
+        }
+        secret.copy_from_slice(&plain);
+        Ok(secret)
+    }
 
-impl EncryptedWallet {
-    /// Returns the wallet identifier recorded in the file.
+    /// Encrypts a master secret as a version 3 file.
+    pub fn encrypt_master(
+        master: &MasterSecret,
+        password: &Password,
+        generation: u64,
+    ) -> Result<Self, WalletError> {
+        Self::encrypt_master_with_params(master, password, generation, KdfParams::DEFAULT)
+    }
+
+    /// Like [`EncryptedWallet::encrypt_master`], with explicit Argon2id
+    /// parameters.
+    pub fn encrypt_master_with_params(
+        master: &MasterSecret,
+        password: &Password,
+        generation: u64,
+        kdf: KdfParams,
+    ) -> Result<Self, WalletError> {
+        Self::seal(
+            WALLET_FILE_VERSION_MASTER,
+            master.fingerprint().into_bytes(),
+            master.as_bytes(),
+            password,
+            generation,
+            kdf,
+        )
+    }
+
+    /// Decrypts a version 3 file and checks the secret against the recorded
+    /// fingerprint.
+    pub fn decrypt_master(&self, password: &Password) -> Result<MasterSecret, WalletError> {
+        if self.version != WALLET_FILE_VERSION_MASTER {
+            return Err(WalletError::WrongKind);
+        }
+        let master = MasterSecret::from_bytes(*self.open(password)?);
+        if master.fingerprint().into_bytes() != self.identity {
+            return Err(WalletError::IdentityMismatch);
+        }
+        Ok(master)
+    }
+
+    /// What the file holds.
+    #[must_use]
+    pub const fn kind(&self) -> WalletKind {
+        if self.version == WALLET_FILE_VERSION_MASTER {
+            WalletKind::Master
+        } else {
+            WalletKind::SingleKey
+        }
+    }
+
+    /// Returns the identity recorded in the file: the wallet id of a
+    /// version 2 file, or the fingerprint of a version 3 file.
     ///
-    /// It is authenticated only once [`EncryptedWallet::decrypt`] succeeds;
-    /// before that it is a claim, useful to reject the wrong file cheaply.
+    /// It is authenticated only once decryption succeeds; before that it is
+    /// a claim, useful to reject the wrong file cheaply.
+    #[must_use]
+    pub const fn identity(&self) -> Hash256 {
+        Hash256::new(self.identity)
+    }
+
+    /// Returns the wallet identifier recorded in a version 2 file. For a
+    /// version 3 file this is the fingerprint, not a wallet id.
     #[must_use]
     pub const fn wallet_id(&self) -> WalletId {
-        self.wallet_id
+        WalletId::new(Hash256::new(self.identity))
     }
 
     /// Returns the generation counter recorded in the file.
@@ -293,23 +423,14 @@ impl EncryptedWallet {
     /// avoiding an authenticity oracle. After decryption the recovered key
     /// must match the recorded wallet id.
     pub fn decrypt(&self, password: &Password) -> Result<Wallet, WalletError> {
-        let key = derive_key(password, &self.salt, self.kdf)?;
-        let cipher = XChaCha20Poly1305::new((&*key).into());
-        let seed = Zeroizing::new(
-            cipher
-                .decrypt(
-                    XNonce::from_slice(&self.nonce),
-                    Payload {
-                        msg: &self.ciphertext,
-                        aad: &self.header(),
-                    },
-                )
-                .map_err(|_| WalletError::DecryptionFailed)?,
-        );
+        if self.version != WALLET_FILE_VERSION {
+            return Err(WalletError::WrongKind);
+        }
+        let seed = self.open(password)?;
         let private_key =
-            PrivateKey::from_seed(&seed).map_err(|_| WalletError::DecryptionFailed)?;
+            PrivateKey::from_seed(&*seed).map_err(|_| WalletError::DecryptionFailed)?;
         let wallet = Wallet::from_private_key(private_key)?;
-        if wallet.wallet_id() != self.wallet_id {
+        if wallet.wallet_id() != self.wallet_id() {
             return Err(WalletError::IdentityMismatch);
         }
         Ok(wallet)
@@ -327,7 +448,7 @@ impl EncryptedWallet {
         expected: &WalletId,
         minimum_generation: u64,
     ) -> Result<Wallet, WalletError> {
-        if self.wallet_id != *expected {
+        if self.wallet_id() != *expected {
             return Err(WalletError::WrongWallet);
         }
         if self.generation < minimum_generation {
@@ -343,13 +464,13 @@ impl EncryptedWallet {
         let mut header = [0_u8; HEADER_BYTES];
         let mut writer = Writer::new(&mut header);
         writer.put(&WALLET_FILE_MAGIC);
-        writer.put(&[WALLET_FILE_VERSION]);
+        writer.put(&[self.version]);
         writer.put(&self.kdf.memory_kib.to_be_bytes());
         writer.put(&self.kdf.passes.to_be_bytes());
         writer.put(&self.kdf.lanes.to_be_bytes());
         writer.put(&self.salt);
         writer.put(&self.nonce);
-        writer.put(self.wallet_id.as_bytes());
+        writer.put(&self.identity);
         writer.put(&self.generation.to_be_bytes());
         header
     }
@@ -370,7 +491,7 @@ impl EncryptedWallet {
     pub fn from_bytes(encoded: &[u8]) -> Result<Self, WalletError> {
         if encoded.len() != Self::serialized_len()
             || encoded[..4] != WALLET_FILE_MAGIC
-            || encoded[4] != WALLET_FILE_VERSION
+            || !matches!(encoded[4], WALLET_FILE_VERSION | WALLET_FILE_VERSION_MASTER)
         {
             return Err(WalletError::InvalidStorageFormat);
         }
@@ -385,10 +506,11 @@ impl EncryptedWallet {
             return Err(WalletError::UnsupportedKdfParams);
         }
         Ok(Self {
+            version: encoded[4],
             kdf,
             salt: reader.take(),
             nonce: reader.take(),
-            wallet_id: WalletId::new(Hash256::new(reader.take())),
+            identity: reader.take(),
             generation: u64::from_be_bytes(reader.take()),
             ciphertext: reader.take(),
         })
@@ -484,6 +606,9 @@ pub enum WalletError {
     IdentityMismatch,
     /// The file belongs to a different wallet than the caller expected.
     WrongWallet,
+    /// The file holds a single key where a master secret was expected, or
+    /// the reverse.
+    WrongKind,
     /// The file is older than a generation the caller has already seen.
     RolledBack {
         /// Generation recorded in the file.
@@ -530,6 +655,7 @@ impl fmt::Display for WalletError {
                 formatter.write_str("decrypted key does not match the wallet id in the file")
             }
             Self::WrongWallet => formatter.write_str("wallet file belongs to a different wallet"),
+            Self::WrongKind => formatter.write_str("wallet file holds a different kind of secret"),
             Self::RolledBack { found, minimum } => write!(
                 formatter,
                 "wallet file generation {found} is older than required generation {minimum}"
@@ -567,6 +693,61 @@ mod tests {
         wallet
             .encrypt_with_params(pass, generation, KdfParams::MINIMUM)
             .unwrap()
+    }
+
+    #[test]
+    fn master_wallets_round_trip_and_keep_kinds_apart() {
+        let master = MasterSecret::generate();
+        let pass = password("master password");
+        let encrypted =
+            EncryptedWallet::encrypt_master_with_params(&master, &pass, 4, KdfParams::MINIMUM)
+                .unwrap();
+        assert_eq!(encrypted.kind(), WalletKind::Master);
+        assert_eq!(encrypted.identity(), master.fingerprint());
+        assert_eq!(encrypted.generation(), 4);
+        let parsed = EncryptedWallet::from_bytes(&encrypted.to_bytes()).unwrap();
+        assert_eq!(parsed, encrypted);
+        assert_eq!(
+            parsed.decrypt_master(&pass).unwrap().as_bytes(),
+            master.as_bytes()
+        );
+        assert!(matches!(
+            parsed.decrypt_master(&password("wrong password!")),
+            Err(WalletError::DecryptionFailed)
+        ));
+        // A master file never opens as a single key, and the reverse.
+        assert!(matches!(parsed.decrypt(&pass), Err(WalletError::WrongKind)));
+        let single = fast(&Wallet::create().unwrap(), &pass, 0);
+        assert_eq!(single.kind(), WalletKind::SingleKey);
+        assert!(matches!(
+            single.decrypt_master(&pass),
+            Err(WalletError::WrongKind)
+        ));
+
+        // Changing the password replaces the file with a higher generation.
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("wallet.itcw");
+        encrypted.write_new(&path).unwrap();
+        let next = EncryptedWallet::encrypt_master_with_params(
+            &master,
+            &password("a new password"),
+            5,
+            KdfParams::MINIMUM,
+        )
+        .unwrap();
+        next.replace(&path).unwrap();
+        assert!(matches!(
+            encrypted.replace(&path),
+            Err(WalletError::RolledBack { .. })
+        ));
+        // A single-key file cannot replace a master file.
+        let mut impostor = fast(&Wallet::create().unwrap(), &pass, 9);
+        impostor.identity = master.fingerprint().into_bytes();
+        assert!(matches!(
+            impostor.replace(&path),
+            Err(WalletError::WrongWallet)
+        ));
+        assert_eq!(EncryptedWallet::read(&path).unwrap(), next);
     }
 
     #[test]
@@ -632,6 +813,15 @@ mod tests {
             tampered[index] ^= 1;
             match EncryptedWallet::from_bytes(&tampered) {
                 Err(WalletError::InvalidStorageFormat) => assert!(index < 5),
+                // Flipping the version to 3 parses, and the authenticated
+                // header still makes it fail.
+                Ok(parsed) if parsed.kind() == WalletKind::Master => assert!(
+                    matches!(
+                        parsed.decrypt_master(&pass),
+                        Err(WalletError::DecryptionFailed)
+                    ),
+                    "byte {index}"
+                ),
                 Ok(parsed) => assert!(
                     matches!(parsed.decrypt(&pass), Err(WalletError::DecryptionFailed)),
                     "byte {index}"
@@ -673,7 +863,7 @@ mod tests {
             Err(WalletError::DecryptionFailed)
         ));
         let mut forged = foreign.clone();
-        forged.wallet_id = wallet.wallet_id();
+        forged.identity = *wallet.wallet_id().as_bytes();
         assert!(matches!(
             forged.decrypt_checked(&pass, &wallet.wallet_id(), 2),
             Err(WalletError::DecryptionFailed)

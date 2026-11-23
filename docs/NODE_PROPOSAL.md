@@ -498,7 +498,6 @@ RPC. IPs de peers aparecem só em `debug`.
 - **Índice de transações** (`--txindex` e `getrawtransaction` de
   transações confirmadas) e **`--reindex`**.
 - **Notificações** de bloco e transação (WebSocket ou ZMQ) e **Stratum**.
-- **Binário da carteira** consumindo `listunspent` e `sendrawtransaction`.
 - **Minerador com PoW real em teste automático:** existe, mas fica marcado
   `#[ignore]`, porque um bloco na dificuldade mínima custa ≈ 2 minutos de
   CPU. Os demais testes usam a regtest.

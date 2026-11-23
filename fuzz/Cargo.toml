@@ -83,3 +83,17 @@ path = "fuzz_targets/rpc_request.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "wallet_backup"
+path = "fuzz_targets/wallet_backup.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "coin_selection"
+path = "fuzz_targets/coin_selection.rs"
+test = false
+doc = false
+bench = false

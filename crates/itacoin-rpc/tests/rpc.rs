@@ -383,6 +383,46 @@ async fn chain_mining_and_wallet_methods() {
     assert_eq!(entry["fee_sat"], json!("50000"));
     assert_eq!(ok(c, "getmempoolinfo", vec![]).await["size"], json!(1));
 
+    // With include_mempool the spent coin is flagged and the pending output
+    // to the payee shows up unconfirmed.
+    let pending = ok(
+        c,
+        "listunspent",
+        vec![
+            json!([mine, address(other)]),
+            Value::Null,
+            Value::Null,
+            json!(true),
+        ],
+    )
+    .await;
+    let flagged: Vec<&Value> = pending["unspent"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|coin| coin["spent_in_mempool"] == json!(true))
+        .collect();
+    assert_eq!(flagged.len(), 1);
+    assert_eq!(flagged[0]["txid"], coin["txid"]);
+    assert_eq!(pending["unconfirmed"][0]["txid"], txid);
+    assert_eq!(pending["unconfirmed"][0]["address"], json!(address(other)));
+    assert!(
+        ok(c, "listunspent", vec![json!([mine])])
+            .await
+            .get("unconfirmed")
+            .is_none()
+    );
+    let estimate = ok(c, "estimatefee", vec![json!(6)]).await;
+    assert_eq!(estimate["fee_rate"], json!(1));
+    assert_eq!(
+        estimate["mempool_bytes"],
+        json!(transaction.to_bytes().len())
+    );
+    assert_eq!(
+        error_code(c, "estimatefee", vec![json!(0)]).await,
+        code::INVALID_PARAMS
+    );
+
     // A template includes it and pays the fee; submitting it confirms it.
     let template = ok(c, "getblocktemplate", vec![json!(mine)]).await;
     assert_eq!(template["height"], json!(4));

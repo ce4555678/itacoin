@@ -240,6 +240,12 @@ impl Mempool {
         self.entries.contains_key(txid) || self.orphans.contains_key(txid)
     }
 
+    /// Returns the pool transaction that spends `outpoint`, if any.
+    #[must_use]
+    pub fn spent_by(&self, outpoint: &OutPoint) -> Option<TransactionId> {
+        self.spent_by.get(outpoint).copied()
+    }
+
     /// Returns a pool entry.
     #[must_use]
     pub fn get(&self, txid: &TransactionId) -> Option<&Entry> {

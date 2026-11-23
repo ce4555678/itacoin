@@ -1,0 +1,18 @@
+[package]
+name = "itacoin-process"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Process protections, private directories and secret input shared by the ITACOIN binaries."
+
+[dependencies]
+rustix = { workspace = true, features = ["termios"] }
+zeroize.workspace = true
+
+[dev-dependencies]
+tempfile = "=3.27.0"
+
+[lints]
+workspace = true

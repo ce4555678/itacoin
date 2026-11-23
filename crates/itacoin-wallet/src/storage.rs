@@ -52,7 +52,7 @@ impl EncryptedWallet {
     pub fn replace(&self, path: &Path) -> Result<(), WalletError> {
         let _lock = WriteLock::acquire(path)?;
         let existing = Self::read(path)?;
-        if existing.wallet_id() != self.wallet_id() {
+        if existing.identity() != self.identity() || existing.kind() != self.kind() {
             return Err(WalletError::WrongWallet);
         }
         if existing.generation() >= self.generation() {

@@ -12,13 +12,12 @@ use tracing_subscriber::EnvFilter;
 
 mod config;
 mod mining;
-mod process;
 
 use config::{CONFIG_FILE, Cli, FileConfig, Settings};
 
 fn main() -> ExitCode {
     // Protections first, before any file is opened (V-07).
-    let warnings = process::harden();
+    let warnings = itacoin_process::harden();
     let cli = Cli::parse();
     match prepare(cli) {
         Ok((settings, lock)) => {
@@ -48,12 +47,12 @@ fn main() -> ExitCode {
     }
 }
 
-fn prepare(cli: Cli) -> Result<(Settings, process::DirLock), String> {
+fn prepare(cli: Cli) -> Result<(Settings, itacoin_process::DirLock), String> {
     let (network, data_dir) = config::network_and_dir(&cli)?;
     config::params_for(network)?;
-    process::create_data_dir(&data_dir)
+    itacoin_process::create_data_dir(&data_dir)
         .map_err(|error| format!("could not create {}: {error}", data_dir.display()))?;
-    let lock = process::DirLock::acquire(&data_dir)?;
+    let lock = itacoin_process::DirLock::acquire(&data_dir)?;
     let file = FileConfig::load(&data_dir.join(CONFIG_FILE))?;
     let settings = config::resolve(cli, file, network, data_dir)?;
     Ok((settings, lock))

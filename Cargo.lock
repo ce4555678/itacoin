@@ -701,9 +701,9 @@ dependencies = [
  "itacoin-miner",
  "itacoin-network",
  "itacoin-primitives",
+ "itacoin-process",
  "itacoin-rpc",
  "itacoin-transaction",
- "rustix",
  "serde",
  "serde_json",
  "tempfile",
@@ -718,6 +718,15 @@ name = "itacoin-primitives"
 version = "0.1.0"
 dependencies = [
  "bech32",
+]
+
+[[package]]
+name = "itacoin-process"
+version = "0.1.0"
+dependencies = [
+ "rustix",
+ "tempfile",
+ "zeroize",
 ]
 
 [[package]]
@@ -775,11 +784,36 @@ name = "itacoin-wallet"
 version = "0.1.0"
 dependencies = [
  "argon2",
+ "bech32",
+ "blake3",
  "chacha20poly1305",
+ "itacoin-codec",
  "itacoin-crypto",
  "itacoin-primitives",
+ "itacoin-transaction",
  "rand_core 0.6.4",
  "tempfile",
+ "zeroize",
+]
+
+[[package]]
+name = "itacoin-wallet-cli"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "itacoin-codec",
+ "itacoin-consensus",
+ "itacoin-crypto",
+ "itacoin-network",
+ "itacoin-primitives",
+ "itacoin-process",
+ "itacoin-rpc",
+ "itacoin-transaction",
+ "itacoin-wallet",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
  "zeroize",
 ]
 

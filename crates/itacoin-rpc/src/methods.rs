@@ -76,6 +76,7 @@ pub const METHODS: &[&str] = &[
     "cleardiscouraged",
     "decoderawtransaction",
     "disconnectnode",
+    "estimatefee",
     "generatetoaddress",
     "getbalance",
     "getbestblockhash",
@@ -142,6 +143,7 @@ pub async fn dispatch(context: &Context, method: &str, params: &[Value]) -> RpcR
         "getblocktemplate" => get_block_template(context, params).await,
         "submitblock" => submit_block(context, params).await,
         "getmininginfo" => get_mining_info(context).await,
+        "estimatefee" => estimate_fee(context, params).await,
         "setmining" => set_mining(context, params).await,
         "generatetoaddress" => generate_to_address(context, params).await,
         "validateaddress" => validate_address(context, params),
@@ -766,6 +768,61 @@ async fn submit_block(context: &Context, params: &[Value]) -> RpcResult {
     verdict_json(core(context, move |core| core.submit_local_block(block)).await?)
 }
 
+/// Most blocks `estimatefee` looks ahead.
+pub const MAX_FEE_TARGET: u64 = 1_008;
+
+/// The fee rate that gets a transaction into the next `room` bytes of
+/// blocks: the minimum if the whole pool fits, otherwise one more than the
+/// rate of the transaction at the edge.
+#[must_use]
+pub fn fee_rate_for(mut entries: Vec<(u64, usize)>, room: usize, minimum: u64) -> u64 {
+    // Highest fee rate first, compared exactly by cross-multiplication.
+    entries.sort_unstable_by(|a, b| {
+        (u128::from(b.0) * a.1.max(1) as u128).cmp(&(u128::from(a.0) * b.1.max(1) as u128))
+    });
+    let mut used = 0_usize;
+    for (fee, size) in entries {
+        used = used.saturating_add(size);
+        if used > room {
+            return fee
+                .div_ceil(size.max(1) as u64)
+                .saturating_add(1)
+                .max(minimum);
+        }
+    }
+    minimum
+}
+
+async fn estimate_fee(context: &Context, params: &[Value]) -> RpcResult {
+    let blocks = u64_param(params, 0, "blocks")?.unwrap_or(6);
+    if blocks == 0 || blocks > MAX_FEE_TARGET {
+        return Err(RpcError::params(format!(
+            "blocks must be 1 to {MAX_FEE_TARGET}"
+        )));
+    }
+    let (rate, minimum, queued) = core(context, move |core| {
+        let mempool = core.mempool();
+        let minimum = mempool.policy().min_fee_per_byte;
+        let entries: Vec<(u64, usize)> = mempool
+            .entries()
+            .map(|entry| (entry.fee().as_satoshis(), entry.size()))
+            .collect();
+        let queued: usize = entries.iter().map(|(_, size)| size).sum();
+        let room = usize::try_from(blocks)
+            .unwrap_or(usize::MAX)
+            .saturating_mul(MAX_BLOCK_BYTES);
+        let rate = fee_rate_for(entries, room, minimum);
+        (rate, minimum, queued)
+    })
+    .await?;
+    Ok(json!({
+        "fee_rate": rate,
+        "blocks": blocks,
+        "min_fee_rate": minimum,
+        "mempool_bytes": queued,
+    }))
+}
+
 async fn get_mining_info(context: &Context) -> RpcResult {
     let (height, target, work) = core(context, |core| {
         let chain = core.chain();
@@ -889,34 +946,92 @@ async fn list_unspent(context: &Context, params: &[Value]) -> RpcResult {
         Some(_) => Some(outpoint_cursor(string_param(params, 1, "cursor")?)?),
     };
     let limit = limit_param(params, 2)?;
-    let (coins, tip, more) = core(context, move |core| {
+    let include_mempool = bool_param(params, 3, "include_mempool")?.unwrap_or(false);
+    let (coins, tip, more, unconfirmed) = core(context, move |core| {
         let utxo = core.chain().utxo();
-        let mut coins: Vec<(OutPoint, Coin)> = wallets
+        let mempool = core.mempool();
+        let mut coins: Vec<(OutPoint, Coin, bool)> = wallets
             .iter()
             .flat_map(|wallet| utxo.outpoints_of(wallet))
             .filter(|outpoint| after.is_none_or(|after| **outpoint > after))
-            .filter_map(|outpoint| utxo.get(outpoint).map(|coin| (*outpoint, *coin)))
+            .filter_map(|outpoint| {
+                utxo.get(outpoint).map(|coin| {
+                    let spent = include_mempool && mempool.spent_by(outpoint).is_some();
+                    (*outpoint, *coin, spent)
+                })
+            })
             .collect();
-        coins.sort_unstable_by_key(|(outpoint, _)| *outpoint);
+        coins.sort_unstable_by_key(|(outpoint, _, _)| *outpoint);
         let more = coins.len() > limit;
         coins.truncate(limit);
-        (coins, core.chain().tip().map_or(0, |tip| tip.height), more)
+        // Outputs of pool transactions paying these addresses, not yet spent
+        // by another pool transaction. Bounded by the pool and the limit.
+        let mut unconfirmed: Vec<(OutPoint, itacoin_transaction::Output)> = Vec::new();
+        if include_mempool && after.is_none() {
+            let wanted: HashSet<WalletId> = wallets.iter().copied().collect();
+            for entry in mempool.entries() {
+                let transaction = entry.transaction().unsigned();
+                for (index, output) in transaction.outputs().iter().enumerate() {
+                    let Ok(index) = u16::try_from(index) else {
+                        continue;
+                    };
+                    let outpoint = OutPoint {
+                        txid: entry.txid(),
+                        index,
+                    };
+                    if wanted.contains(&output.wallet_id) && mempool.spent_by(&outpoint).is_none() {
+                        unconfirmed.push((outpoint, *output));
+                    }
+                }
+            }
+            unconfirmed.sort_unstable_by_key(|(outpoint, _)| *outpoint);
+            unconfirmed.truncate(limit);
+        }
+        (
+            coins,
+            core.chain().tip().map_or(0, |tip| tip.height),
+            more,
+            unconfirmed,
+        )
     })
     .await?;
     let next = if more {
         coins
             .last()
-            .map(|(outpoint, _)| format!("{}:{}", outpoint.txid, outpoint.index))
+            .map(|(outpoint, _, _)| format!("{}:{}", outpoint.txid, outpoint.index))
     } else {
         None
     };
-    Ok(json!({
+    let network = context.params.network;
+    let mut result = json!({
         "unspent": coins
             .iter()
-            .map(|(outpoint, coin)| coin_json(outpoint, coin, tip, &context.params))
+            .map(|(outpoint, coin, spent)| {
+                let mut object = coin_json(outpoint, coin, tip, &context.params);
+                if include_mempool {
+                    object["spent_in_mempool"] = json!(spent);
+                }
+                object
+            })
             .collect::<Vec<_>>(),
         "next": next,
-    }))
+    });
+    if include_mempool {
+        result["unconfirmed"] = json!(
+            unconfirmed
+                .iter()
+                .map(|(outpoint, output)| json!({
+                    "txid": outpoint.txid.to_string(),
+                    "index": outpoint.index,
+                    "amount_sat": format_sat(output.amount),
+                    "wallet_id": output.wallet_id.to_string(),
+                    "address": Address::new(network, output.wallet_id).to_string(),
+                    "confirmations": 0,
+                }))
+                .collect::<Vec<_>>()
+        );
+    }
+    Ok(result)
 }
 
 async fn get_balance(context: &Context, params: &[Value]) -> RpcResult {
@@ -1026,4 +1141,36 @@ async fn add_node(context: &Context, params: &[Value]) -> RpcResult {
         _ => return Err(RpcError::params("command must be add, remove or onetry")),
     }
     Ok(Value::Null)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fee_rate_for;
+
+    #[test]
+    fn fee_estimates_outbid_the_edge_of_the_window() {
+        // Everything fits: the minimum.
+        assert_eq!(
+            fee_rate_for(vec![(5_000, 1_000), (50_000, 1_000)], 10_000, 1),
+            1
+        );
+        assert_eq!(fee_rate_for(Vec::new(), 10_000, 3), 3);
+        // Window of 2 000 bytes: rates 50, 20, 10 and 5 per byte. The third
+        // transaction (10 per byte) crosses the edge.
+        let entries = vec![
+            (5_000, 1_000),
+            (50_000, 1_000),
+            (10_000, 1_000),
+            (20_000, 1_000),
+        ];
+        assert_eq!(fee_rate_for(entries.clone(), 2_000, 1), 11);
+        assert_eq!(fee_rate_for(entries.clone(), 3_000, 1), 6);
+        // The minimum is a floor.
+        assert_eq!(fee_rate_for(entries, 3_000, 9), 9);
+        // Non-integer rates round up before outbidding.
+        assert_eq!(
+            fee_rate_for(vec![(1_001, 1_000), (999, 1_000)], 1_000, 1),
+            2
+        );
+    }
 }

@@ -19,8 +19,8 @@ itacoin-consensus = { path = "../itacoin-consensus" }
 itacoin-miner = { path = "../itacoin-miner" }
 itacoin-network = { path = "../itacoin-network" }
 itacoin-primitives = { path = "../itacoin-primitives" }
+itacoin-process = { path = "../itacoin-process" }
 itacoin-rpc = { path = "../itacoin-rpc" }
-rustix.workspace = true
 serde.workspace = true
 tokio = { workspace = true, features = ["signal"] }
 toml.workspace = true

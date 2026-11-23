@@ -13,6 +13,8 @@ members = [
     "crates/itacoin-miner",
     "crates/itacoin-rpc",
     "crates/itacoin-node",
+    "crates/itacoin-process",
+    "crates/itacoin-wallet-cli",
 ]
 resolver = "2"
 

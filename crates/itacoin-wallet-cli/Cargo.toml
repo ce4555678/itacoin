@@ -1,0 +1,34 @@
+[package]
+name = "itacoin-wallet-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The itacoin-wallet command-line wallet."
+
+[[bin]]
+name = "itacoin-wallet"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+itacoin-codec = { path = "../itacoin-codec" }
+itacoin-crypto = { path = "../itacoin-crypto" }
+itacoin-consensus = { path = "../itacoin-consensus" }
+itacoin-primitives = { path = "../itacoin-primitives" }
+itacoin-process = { path = "../itacoin-process" }
+itacoin-rpc = { path = "../itacoin-rpc" }
+itacoin-transaction = { path = "../itacoin-transaction" }
+itacoin-wallet = { path = "../itacoin-wallet" }
+serde.workspace = true
+serde_json.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+itacoin-network = { path = "../itacoin-network" }
+tempfile = "=3.27.0"
+tokio.workspace = true
+
+[lints]
+workspace = true

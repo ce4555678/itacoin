@@ -14,8 +14,10 @@ reorganização. A [rede P2P](docs/NETWORK_PROPOSAL.md) usa transporte
 criptografado pós-quântico (X25519 + ML-KEM-768), sincronização por cabeçalhos,
 mempool com RBF e *compact blocks*. O [nó](docs/NODE_PROPOSAL.md)
 `itacoin-node` junta rede, JSON-RPC e um minerador embutido de várias
-threads; `itacoin-cli` é o cliente do RPC. Não está pronto para produção ou
-para guardar fundos reais.
+threads; `itacoin-cli` é o cliente do RPC. A [carteira](docs/WALLET_PROPOSAL.md)
+`itacoin-wallet` deriva todas as chaves de um segredo mestre com backup
+`itcseed1…` e monta, assina e envia transações pelo nó. Não está pronto
+para produção ou para guardar fundos reais.
 
 ## Segurança e compatibilidade
 
@@ -28,12 +30,11 @@ assinatura: 3309 bytes). Uma revisão criptográfica independente, testes de
 interoperabilidade adicionais e uma política formal de rotação de chaves são
 pré-requisitos para produção.
 
-A chave privada da carteira é armazenada como a seed ML-DSA de 32 bytes,
-criptografada localmente com Argon2id e XChaCha20-Poly1305. Não existe frase de
-recuperação nesta etapa: faça backup do arquivo criptografado e mantenha a senha
-em um gerenciador seguro. Perder ambos torna a chave irrecuperável. Uma seed
-frase não será criada sem definir um formato de backup interoperável para
-ML-DSA-65.
+A carteira guarda um segredo mestre de 32 bytes, criptografado localmente
+com Argon2id e XChaCha20-Poly1305, do qual todas as chaves ML-DSA-65 são
+derivadas. O backup é o texto `itcseed1…` (Bech32m, com versão e checksum)
+mostrado na criação; ele não é uma frase BIP 39 e não deve ser digitado em
+carteiras de outras moedas. Quem tem o backup gasta os fundos.
 
 Os achados da [auditoria de segurança](docs/SECURITY_AUDIT.md) e o estado de
 cada correção estão em [docs/REMEDIATION.md](docs/REMEDIATION.md). As
@@ -67,6 +68,13 @@ target/release/itacoin-cli --network regtest getblockchaininfo
 
 # Testnet, minerando com núcleos − 1.
 target/release/itacoin-node --network testnet --mine --mine-address <endereço titc1…>
+```
+
+```sh
+# Carteira (o nó precisa estar rodando).
+target/release/itacoin-wallet --network regtest create
+target/release/itacoin-wallet --network regtest receive
+target/release/itacoin-wallet --network regtest send <endereço> 1.5
 ```
 
 `--network` é obrigatório. Os dados ficam em `~/.itacoin/<rede>/` (mude a
