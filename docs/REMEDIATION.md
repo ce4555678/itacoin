@@ -40,7 +40,7 @@ Nada foi lançado, mas estas mudanças alteram valores e APIs da etapa 1:
 
 `fuzz/` contém alvos `cargo-fuzz` (fora do workspace, exigem nightly) para
 `Signature`, `PublicKey`, `EncryptedWallet`, `Address`, `Amount`,
-`Transaction` e `Block`. Cada alvo
+`Transaction`, `Block` e as mensagens de rede (`message`). Cada alvo
 exige ausência de panic e ida e volta canônica dos bytes ou do texto aceitos:
 
 ```sh
@@ -49,10 +49,11 @@ cargo +nightly fuzz run encrypted_wallet -- -max_total_time=60
 
 ## Próximos passos
 
-1. Fase 5: rede P2P com threat model (Sybil, eclipse, flooding), limites de
-   conexão e de mensagem, pool de órfãos e propagação por *compact blocks*.
-2. Mineração (`itacoin-miner`), RPC e o binário `itacoin-node`, que também
+1. Mineração (`itacoin-miner`), RPC e o binário `itacoin-node`, que também
    deve aplicar as proteções de processo do V-07.
+2. Pendências da [rede](NETWORK_PROPOSAL.md#ainda-não-implementado): sementes
+   DNS, Tor, anúncio do próprio endereço, limite de banda histórico, rede
+   simulada e revisão criptográfica do handshake.
 3. `ChainStore` mantém todo o UTXO set em memória e guarda todos os blocos;
    cache limitado e poda de testemunhas (requisito 1.9) ficam para depois.
 4. Fuzzing contínuo (OSS-Fuzz ou execução longa agendada), além do job curto do CI.

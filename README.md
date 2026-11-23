@@ -10,8 +10,10 @@ criptografada com arquivo autenticado e proteção contra rollback, e o
 persistido com [redb](https://docs.rs/redb) e resistente a quedas, e as regras
 de [consenso](docs/CONSENSUS_PROPOSAL.md): emissão, prova de trabalho Argon2id,
 dificuldade aserti3-2d, timestamps e escolha da cadeia de maior trabalho com
-reorganização.
-Ele não implementa rede, mineração, RPC nem um binário de nó. Não está pronto para produção ou para guardar fundos reais.
+reorganização. A [rede P2P](docs/NETWORK_PROPOSAL.md) usa transporte
+criptografado pós-quântico (X25519 + ML-KEM-768), sincronização por cabeçalhos,
+mempool com RBF e *compact blocks*.
+Ele não implementa mineração, RPC nem um binário de nó. Não está pronto para produção ou para guardar fundos reais.
 
 ## Segurança e compatibilidade
 
@@ -55,5 +57,5 @@ exige igualdade exata com esse valor.
 ## Escopo futuro reservado
 
 Os diretórios para os demais componentes são reservados para etapas futuras:
-`itacoin-network`, `itacoin-miner`,
+`itacoin-miner`,
 `itacoin-rpc` e `itacoin-node`.

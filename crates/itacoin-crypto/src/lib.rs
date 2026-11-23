@@ -8,6 +8,10 @@
 //! They are versioned by the surrounding protocol, not self-describing formats.
 
 use core::fmt;
+use std::{
+    collections::{HashSet, VecDeque},
+    sync::{LazyLock, Mutex, PoisonError},
+};
 
 use itacoin_primitives::{BlockId, Hash256, TransactionId, WalletId};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
@@ -33,6 +37,10 @@ const INTERNAL_HASH_CONTEXT: &str = "itacoin:internal:v1";
 const WITNESS_HASH_CONTEXT: &str = "itacoin:witness:v1";
 const SPENT_OUTPUTS_CONTEXT: &str = "itacoin:spent-outputs:v1";
 const SIGHASH_CONTEXT: &str = "itacoin:sighash:v1";
+const SIGNATURE_CACHE_CONTEXT: &str = "itacoin:signature-cache:v1";
+
+/// Number of successful verifications [`verify_cached`] remembers.
+pub const SIGNATURE_CACHE_ENTRIES: usize = 100_000;
 
 /// Upper bound on the number of leaves [`merkle_root`] accepts.
 ///
@@ -364,6 +372,64 @@ pub fn verify(
     }
 }
 
+/// Successful verifications, keyed by a hash of everything that was verified.
+struct SignatureCache {
+    keys: HashSet<Hash256>,
+    order: VecDeque<Hash256>,
+}
+
+static SIGNATURE_CACHE: LazyLock<Mutex<SignatureCache>> = LazyLock::new(|| {
+    Mutex::new(SignatureCache {
+        keys: HashSet::new(),
+        order: VecDeque::new(),
+    })
+});
+
+/// Like [`verify`], but remembers successful verifications.
+///
+/// A transaction verified when it entered the mempool is not verified again
+/// when it arrives in a block (protocol requirement 1.7). Only successes are
+/// cached, under a hash of the domain, message, public key and signature, so a
+/// cache hit means exactly this verification already succeeded. The cache is
+/// bounded and forgets the oldest entries first.
+pub fn verify_cached(
+    public_key: &PublicKey,
+    domain: SigningDomain,
+    message: &[u8],
+    signature: &Signature,
+) -> Result<(), CryptoError> {
+    let key = hash_parts(
+        SIGNATURE_CACHE_CONTEXT,
+        &[
+            domain.context(),
+            message,
+            public_key.as_bytes(),
+            signature.as_bytes(),
+        ],
+    );
+    if lock_cache().keys.contains(&key) {
+        return Ok(());
+    }
+    verify(public_key, domain, message, signature)?;
+    let mut cache = lock_cache();
+    if cache.keys.insert(key) {
+        cache.order.push_back(key);
+        if cache.order.len() > SIGNATURE_CACHE_ENTRIES
+            && let Some(oldest) = cache.order.pop_front()
+        {
+            cache.keys.remove(&oldest);
+        }
+    }
+    Ok(())
+}
+
+fn lock_cache() -> std::sync::MutexGuard<'static, SignatureCache> {
+    // The cache holds no invariant a panic could break; recover from poison.
+    SIGNATURE_CACHE
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+}
+
 fn validate_length(
     component: &'static str,
     expected: usize,
@@ -470,6 +536,7 @@ mod tests {
             WITNESS_HASH_CONTEXT,
             SPENT_OUTPUTS_CONTEXT,
             SIGHASH_CONTEXT,
+            SIGNATURE_CACHE_CONTEXT,
         ];
         let mut hashes: Vec<Hash256> = contexts
             .iter()
@@ -619,6 +686,41 @@ mod tests {
         assert_ne!(
             SigningDomain::Message.context(),
             SigningDomain::Transaction.context()
+        );
+    }
+
+    #[test]
+    fn cached_verification_matches_verify() {
+        let pair = KeyPair::generate().unwrap();
+        let other = KeyPair::generate().unwrap();
+        let domain = SigningDomain::Transaction;
+        let signature = pair.private_key.sign(domain, b"cached").unwrap();
+        // Twice: the second call is a cache hit with the same answer.
+        for _ in 0..2 {
+            verify_cached(&pair.public_key, domain, b"cached", &signature).unwrap();
+        }
+        // A hit for one tuple never validates a different one.
+        assert_eq!(
+            verify_cached(&other.public_key, domain, b"cached", &signature),
+            Err(CryptoError::VerificationFailed)
+        );
+        assert_eq!(
+            verify_cached(&pair.public_key, domain, b"other", &signature),
+            Err(CryptoError::VerificationFailed)
+        );
+        assert_eq!(
+            verify_cached(
+                &pair.public_key,
+                SigningDomain::Message,
+                b"cached",
+                &signature
+            ),
+            Err(CryptoError::VerificationFailed)
+        );
+        // Failures are never cached.
+        assert_eq!(
+            verify_cached(&other.public_key, domain, b"cached", &signature),
+            Err(CryptoError::VerificationFailed)
         );
     }
 

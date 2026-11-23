@@ -46,7 +46,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [signature, public_key, encrypted_wallet, address, amount, transaction, block]
+        target: [signature, public_key, encrypted_wallet, address, amount, transaction, block, message]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly

@@ -1,0 +1,20 @@
+[package]
+name = "itacoin-mempool"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "ITACOIN transaction pool policy: fees, replacement, eviction and orphans."
+
+[dependencies]
+itacoin-blockchain = { path = "../itacoin-blockchain" }
+itacoin-codec = { path = "../itacoin-codec" }
+itacoin-primitives = { path = "../itacoin-primitives" }
+itacoin-transaction = { path = "../itacoin-transaction" }
+
+[dev-dependencies]
+itacoin-crypto = { path = "../itacoin-crypto" }
+
+[lints]
+workspace = true

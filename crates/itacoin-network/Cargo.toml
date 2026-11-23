@@ -1,0 +1,32 @@
+[package]
+name = "itacoin-network"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "ITACOIN peer-to-peer networking: encrypted transport, sync and relay."
+
+[dependencies]
+blake3.workspace = true
+chacha20poly1305.workspace = true
+itacoin-blockchain = { path = "../itacoin-blockchain" }
+itacoin-codec = { path = "../itacoin-codec" }
+itacoin-consensus = { path = "../itacoin-consensus" }
+itacoin-mempool = { path = "../itacoin-mempool" }
+itacoin-primitives = { path = "../itacoin-primitives" }
+itacoin-storage = { path = "../itacoin-storage" }
+itacoin-transaction = { path = "../itacoin-transaction" }
+ml-kem.workspace = true
+rand_core.workspace = true
+siphasher.workspace = true
+tokio.workspace = true
+x25519-dalek.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+itacoin-crypto = { path = "../itacoin-crypto" }
+tempfile = "=3.27.0"
+
+[lints]
+workspace = true

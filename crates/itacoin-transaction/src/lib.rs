@@ -13,7 +13,7 @@ use std::collections::HashSet;
 use itacoin_codec::{CodecError, Decode, Encode, Reader, Writer, decode_exact};
 use itacoin_crypto::{
     CryptoError, ML_DSA_65_PUBLIC_KEY_BYTES, ML_DSA_65_SIGNATURE_BYTES, PublicKey, Signature,
-    SigningDomain, sighash, spent_outputs_hash, transaction_hash, verify, witness_hash,
+    SigningDomain, sighash, spent_outputs_hash, transaction_hash, verify_cached, witness_hash,
 };
 use itacoin_primitives::{Amount, AmountError, Hash256, TransactionId, WalletId};
 
@@ -280,7 +280,7 @@ impl NormalTransaction {
 
         let message = self.unsigned.sighash(chain_id, spent)?;
         for (index, witness) in self.witnesses.iter().enumerate() {
-            verify(
+            verify_cached(
                 &witness.public_key,
                 SigningDomain::Transaction,
                 message.as_bytes(),

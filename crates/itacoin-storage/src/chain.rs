@@ -172,6 +172,30 @@ impl Chain {
         self.index.get(block_id)
     }
 
+    /// Iterates over every known block's index entry, in no particular order.
+    pub fn index(&self) -> impl Iterator<Item = (&BlockId, &IndexEntry)> {
+        self.index.iter()
+    }
+
+    /// Returns the last common ancestor of two known blocks.
+    #[must_use]
+    pub fn common_ancestor(&self, a: BlockId, b: BlockId) -> Option<BlockId> {
+        if !self.index.contains_key(&a) || !self.index.contains_key(&b) {
+            return None;
+        }
+        self.fork_point(Some(a), b)
+    }
+
+    /// Returns the blocks after `ancestor` up to and including `tip`, oldest
+    /// first. `ancestor` must be an ancestor of `tip`.
+    #[must_use]
+    pub fn branch(&self, ancestor: BlockId, tip: BlockId) -> Vec<BlockId> {
+        if !self.index.contains_key(&tip) {
+            return Vec::new();
+        }
+        self.path(Some(ancestor), tip)
+    }
+
     /// Returns the target the block after `parent` must have.
     pub fn next_target(&self, parent: &BlockId) -> Result<U256, ChainError> {
         let parent = self

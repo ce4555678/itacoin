@@ -15,6 +15,7 @@ itacoin-wallet = { path = "../crates/itacoin-wallet" }
 itacoin-codec = { path = "../crates/itacoin-codec" }
 itacoin-transaction = { path = "../crates/itacoin-transaction" }
 itacoin-blockchain = { path = "../crates/itacoin-blockchain" }
+itacoin-network = { path = "../crates/itacoin-network" }
 
 # Kept out of the main workspace: it needs nightly and cargo-fuzz.
 [workspace]
@@ -64,6 +65,13 @@ bench = false
 [[bin]]
 name = "block"
 path = "fuzz_targets/block.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "message"
+path = "fuzz_targets/message.rs"
 test = false
 doc = false
 bench = false

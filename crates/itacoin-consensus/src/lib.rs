@@ -292,6 +292,22 @@ pub fn check_header(
     chain_id: &Hash256,
     params: &ConsensusParams,
 ) -> Result<(), ConsensusError> {
+    check_header_context(header, context, params)?;
+    if !check_pow(header, chain_id) {
+        return Err(ConsensusError::InsufficientWork);
+    }
+    Ok(())
+}
+
+/// The cheap header rules: target and timestamps, without the proof of work.
+///
+/// Callers that verify many headers run this first and then [`check_pow`] in
+/// parallel; [`check_header`] does both in order.
+pub fn check_header_context(
+    header: &BlockHeader,
+    context: &HeaderContext,
+    params: &ConsensusParams,
+) -> Result<(), ConsensusError> {
     if U256::from_hash(&header.target) != context.expected_target {
         return Err(ConsensusError::WrongTarget);
     }
@@ -300,9 +316,6 @@ pub fn check_header(
     }
     if header.timestamp > context.now.saturating_add(params.max_future_drift) {
         return Err(ConsensusError::TimestampInFuture);
-    }
-    if !check_pow(header, chain_id) {
-        return Err(ConsensusError::InsufficientWork);
     }
     Ok(())
 }
