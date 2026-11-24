@@ -496,7 +496,8 @@ RPC. IPs de peers aparecem só em `debug`.
 - **`testmempoolaccept`:** `Mempool::add` valida e insere no mesmo passo;
   validar sem inserir exige separar as duas fases.
 - **Índice de transações** (`--txindex` e `getrawtransaction` de
-  transações confirmadas) e **`--reindex`**.
+  transações confirmadas). O `--reindex` veio com a
+  [proposta de storage](STORAGE_PROPOSAL.md).
 - **Notificações** de bloco e transação (WebSocket ou ZMQ) e **Stratum**.
 - **Minerador com PoW real em teste automático:** existe, mas fica marcado
   `#[ignore]`, porque um bloco na dificuldade mínima custa ≈ 2 minutos de

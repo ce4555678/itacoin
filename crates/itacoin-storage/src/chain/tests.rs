@@ -82,7 +82,7 @@ fn block_on(
 }
 
 fn spend(chain: &Chain, key: &KeyPair, coin: OutPoint, to: WalletId) -> Transaction {
-    let output = chain.utxo().get(&coin).unwrap().output;
+    let output = chain.coin(&coin).unwrap().unwrap().output;
     let unsigned = UnsignedTransaction::new(
         vec![Input {
             previous_output: coin,
@@ -156,9 +156,9 @@ fn opening_creates_the_genesis_block() {
     let tip = chain.tip().unwrap();
     assert_eq!(tip.height, 0);
     assert_eq!(tip.block_id.into_hash(), chain.chain_id());
-    assert_eq!(chain.utxo().len(), 1);
+    assert_eq!(chain.utxo_stats().coins, 1);
     assert_eq!(
-        chain.utxo().total_value(),
+        chain.utxo_stats().total_value,
         itacoin_consensus::subsidy(0, chain.params())
     );
     drop(chain);
@@ -174,12 +174,12 @@ fn blocks_extend_the_chain_and_persist() {
     let tip = chain.tip().unwrap();
     assert_eq!(tip.height, 5);
     assert_eq!(tip.block_id, blocks[4].id());
-    let utxo = chain.utxo().clone();
+    let utxo = chain.snapshot().unwrap();
     drop(chain);
 
     let mut chain = fixture.open();
     assert_eq!(chain.tip(), Some(tip));
-    assert_eq!(chain.utxo(), &utxo);
+    assert_eq!(chain.snapshot().unwrap(), utxo);
     assert_eq!(
         chain.submit_block(&blocks[2], NOW).unwrap(),
         SubmitOutcome::Duplicate
@@ -209,8 +209,8 @@ fn the_chain_with_more_work_wins_and_reorganizes() {
     // after switching instead.
     let b3 = block_on(&chain, &fixture.key, b2.id(), PLAIN, vec![]);
     assert_eq!(chain.submit_block(&b3, NOW).unwrap(), SubmitOutcome::NewTip);
-    assert!(chain.utxo().get(&coinbase_outpoint(&b1)).is_some());
-    assert!(chain.utxo().get(&coinbase_outpoint(&a[0])).is_none());
+    assert!(chain.coin(&coinbase_outpoint(&b1)).unwrap().is_some());
+    assert!(chain.coin(&coinbase_outpoint(&a[0])).unwrap().is_none());
 
     let payment = spend(
         &chain,
@@ -220,13 +220,13 @@ fn the_chain_with_more_work_wins_and_reorganizes() {
     );
     let b4 = block_on(&chain, &fixture.key, b3.id(), PLAIN, vec![payment]);
     assert_eq!(chain.submit_block(&b4, NOW).unwrap(), SubmitOutcome::NewTip);
-    assert_eq!(&replay(&chain), chain.utxo());
+    assert_eq!(replay(&chain), chain.snapshot().unwrap());
 
     // Branch A overtakes again: the spend is undone.
     extend(&mut chain, &fixture.key, a[1].id(), 3, 1);
     assert_eq!(chain.tip().unwrap().height, 5);
-    assert!(chain.utxo().get(&coinbase_outpoint(&b1)).is_none());
-    assert_eq!(&replay(&chain), chain.utxo());
+    assert!(chain.coin(&coinbase_outpoint(&b1)).unwrap().is_none());
+    assert_eq!(replay(&chain), chain.snapshot().unwrap());
 }
 
 #[test]
@@ -281,7 +281,7 @@ fn an_invalid_block_on_a_heavier_branch_is_rejected_with_its_descendants() {
     assert!(!chain.entry(&b1.id()).unwrap().invalid);
     assert!(chain.entry(&b2.id()).unwrap().invalid);
     assert!(chain.entry(&b3.id()).unwrap().invalid);
-    assert_eq!(&replay(&chain), chain.utxo());
+    assert_eq!(replay(&chain), chain.snapshot().unwrap());
 
     let b4 = block_on(&chain, &fixture.key, b3.id(), PLAIN, vec![]);
     assert!(matches!(
@@ -417,7 +417,7 @@ fn an_interrupted_reorganization_finishes_on_reopen() {
 
     let chain = fixture.open();
     assert_eq!(chain.tip().unwrap().block_id, b3.id());
-    assert_eq!(&replay(&chain), chain.utxo());
+    assert_eq!(replay(&chain), chain.snapshot().unwrap());
     chain.store().verify().unwrap();
 }
 
@@ -429,7 +429,7 @@ fn arrival_order_does_not_change_the_result() {
     let a = extend(&mut builder, &first.key, genesis, 2, 1);
     let b = extend(&mut builder, &first.key, genesis, 3, 2);
     let mut expected_tip = builder.tip();
-    let expected_utxo = builder.utxo().clone();
+    let expected_utxo = builder.snapshot().unwrap();
 
     let second = Fixture::new();
     let mut other = second.open();
@@ -437,7 +437,7 @@ fn arrival_order_does_not_change_the_result() {
         other.submit_block(block, NOW).unwrap();
     }
     assert_eq!(other.tip(), expected_tip.take());
-    assert_eq!(other.utxo(), &expected_utxo);
+    assert_eq!(other.snapshot().unwrap(), expected_utxo);
 }
 
 #[test]
@@ -467,5 +467,116 @@ fn a_branch_above_a_flagged_block_is_never_activated() {
     ));
     assert!(chain.entry(&b3.id()).unwrap().invalid);
     assert_eq!(chain.tip().unwrap().block_id, a[1].id());
-    assert_eq!(&replay(&chain), chain.utxo());
+    assert_eq!(replay(&chain), chain.snapshot().unwrap());
+}
+
+fn pruning() -> StoreOptions {
+    StoreOptions {
+        prune_depth: Some(crate::MIN_PRUNE_DEPTH),
+        ..StoreOptions::default()
+    }
+}
+
+/// Extends `parent` with `count` blocks on every chain, built on the first.
+fn extend_all(
+    chains: &mut [&mut Chain],
+    key: &KeyPair,
+    mut parent: BlockId,
+    count: usize,
+    tag: u8,
+) -> BlockId {
+    for _ in 0..count {
+        let block = block_on(chains[0], key, parent, Shape { extra: 0, tag }, vec![]);
+        for chain in chains.iter_mut() {
+            chain.submit_block(&block, NOW).unwrap();
+        }
+        parent = block.id();
+    }
+    parent
+}
+
+#[test]
+fn a_pruned_node_reorganizes_like_an_archive_node() {
+    let (archive_fixture, pruned_fixture) = (Fixture::new(), Fixture::new());
+    let mut archive = archive_fixture.open();
+    let mut pruned =
+        Chain::open_with(&pruned_fixture.path, ConsensusParams::regtest(), pruning()).unwrap();
+    archive.set_bulk(true).unwrap();
+    pruned.set_bulk(true).unwrap();
+    let key = &archive_fixture.key;
+    let genesis = genesis_id(&archive);
+
+    // Branch A: 300 blocks. The pruned node drops the witnesses of the
+    // deepest ones.
+    let a_tip = extend_all(&mut [&mut archive, &mut pruned], key, genesis, 300, 1);
+    assert_eq!(pruned.tip().unwrap().block_id, a_tip);
+    assert_eq!(pruned.store.pruned_height(), Some(12));
+
+    // Branch B from genesis overtakes with 310 blocks: a reorganization
+    // that reverts all of A, pruned blocks included.
+    let b_tip = extend_all(&mut [&mut archive, &mut pruned], key, genesis, 310, 2);
+    for chain in [&archive, &pruned] {
+        assert_eq!(chain.tip().unwrap().block_id, b_tip);
+    }
+    assert_eq!(archive.snapshot().unwrap(), pruned.snapshot().unwrap());
+
+    // A comes back: its pruned blocks are applied again from storage,
+    // without their witnesses, since this node validated them before.
+    let a_tip = extend_all(&mut [&mut archive, &mut pruned], key, a_tip, 20, 1);
+    for chain in [&archive, &pruned] {
+        assert_eq!(chain.tip().unwrap().block_id, a_tip);
+        assert_eq!(chain.tip().unwrap().height, 320);
+    }
+    assert_eq!(archive.snapshot().unwrap(), pruned.snapshot().unwrap());
+    pruned.store.check_utxo().unwrap();
+    pruned.store.check_blocks(u64::MAX).unwrap();
+    pruned.flush().unwrap();
+    drop(pruned);
+    // Reopening keeps the same state.
+    let reopened =
+        Chain::open_with(&pruned_fixture.path, ConsensusParams::regtest(), pruning()).unwrap();
+    assert_eq!(reopened.snapshot().unwrap(), archive.snapshot().unwrap());
+}
+
+#[test]
+fn reindexing_rebuilds_the_same_state() {
+    for options in [StoreOptions::default(), pruning()] {
+        let fixture = Fixture::new();
+        let mut chain =
+            Chain::open_with(&fixture.path, ConsensusParams::regtest(), options).unwrap();
+        chain.set_bulk(true).unwrap();
+        let genesis = genesis_id(&chain);
+        let a = extend(&mut chain, &fixture.key, genesis, 2, 0);
+        let payment = spend(
+            &chain,
+            &fixture.key,
+            coinbase_outpoint(&a[0]),
+            WalletId::new(Hash256::new([7; 32])),
+        );
+        let paid = block_on(&chain, &fixture.key, a[1].id(), PLAIN, vec![payment]);
+        chain.submit_block(&paid, NOW).unwrap();
+        extend(&mut chain, &fixture.key, paid.id(), 300, 0);
+        // A side branch, kept by the reindexation.
+        let side = extend(&mut chain, &fixture.key, genesis, 2, 9);
+        let tip = chain.tip();
+        let before = chain.snapshot().unwrap();
+        drop(chain);
+
+        let report = reindex(&fixture.path, ConsensusParams::regtest(), options).unwrap();
+        assert_eq!(report.applied, 304);
+        assert_eq!(report.side_blocks, 2);
+        assert_eq!(report.pruned > 0, options.prune_depth.is_some());
+
+        let chain = Chain::open_with(&fixture.path, ConsensusParams::regtest(), options).unwrap();
+        assert_eq!(chain.tip(), tip);
+        assert_eq!(chain.snapshot().unwrap(), before);
+        assert!(chain.store().block(&side[1].id()).unwrap().is_some());
+        chain.store().check_utxo().unwrap();
+        chain.store().check_blocks(u64::MAX).unwrap();
+        let names: Vec<_> = std::fs::read_dir(fixture.path.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("chain.redb")]);
+    }
 }

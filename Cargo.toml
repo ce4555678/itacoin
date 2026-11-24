@@ -65,6 +65,11 @@ opt-level = 3
 [profile.dev.package.ml-dsa]
 opt-level = 3
 
+# The chain store does a B-tree write per block; unoptimized, it dominates
+# the node tests that build hundreds of blocks.
+[profile.dev.package.redb]
+opt-level = 3
+
 [profile.release]
 overflow-checks = true
 lto = "thin"

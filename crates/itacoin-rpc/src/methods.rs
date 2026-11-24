@@ -12,7 +12,7 @@ use std::{
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
-use itacoin_blockchain::{Block, BlockHeader, Coin, MAX_BLOCK_BYTES};
+use itacoin_blockchain::{Block, BlockHeader, Coin, MAX_BLOCK_BYTES, PrunedBlock};
 use itacoin_codec::Encode;
 use itacoin_consensus::{ConsensusParams, U256, block_work};
 use itacoin_mempool::MempoolError;
@@ -24,7 +24,7 @@ use itacoin_network::{
 use itacoin_primitives::{
     Address, AddressError, BlockId, Hash256, Network, TransactionId, WalletId,
 };
-use itacoin_storage::{Chain, SubmitOutcome};
+use itacoin_storage::{Chain, ChainError, StorageError, StoredBlock, SubmitOutcome};
 use itacoin_transaction::{MAX_TX_BYTES, OutPoint, Transaction};
 use serde_json::{Value, json};
 use tokio::sync::watch;
@@ -460,14 +460,16 @@ async fn get_blockchain_info(context: &Context) -> RpcResult {
             median_time_past_of(chain, tip.block_id),
             core.headers().best().1.height,
             core.is_initial_block_download(),
-            chain.utxo().len(),
-            chain.utxo().total_value(),
+            chain.utxo_stats(),
             core.config().data_dir.join("chain.redb"),
+            *chain.store().options(),
+            chain.store().pruned_height(),
+            chain.store().cache_stats(),
         ))
     })
     .await?
     .ok_or_else(|| RpcError::new(code::INTERNAL_ERROR, "the chain has no tip"))?;
-    let (tip, work, target, mtp, headers, ibd, coins, supply, path) = snapshot;
+    let (tip, work, target, mtp, headers, ibd, stats, path, options, pruned, cache) = snapshot;
     let size = std::fs::metadata(path).map_or(0, |metadata| metadata.len());
     Ok(json!({
         "network": network_name(context.params.network),
@@ -478,9 +480,19 @@ async fn get_blockchain_info(context: &Context) -> RpcResult {
         "median_time": mtp,
         "headers": headers,
         "initial_block_download": ibd,
-        "utxo_count": coins,
-        "supply_sat": format_sat(supply),
+        "utxo_count": stats.coins,
+        "supply_sat": format_sat(stats.total_value),
         "size_on_disk": size,
+        "pruned": options.prune_depth.is_some(),
+        "prune_depth": options.prune_depth,
+        "prune_height": pruned,
+        "wallet_index": options.wallet_index,
+        "coin_cache": {
+            "max_bytes": options.coin_cache_bytes,
+            "coins": cache.2,
+            "hits": cache.0,
+            "misses": cache.1,
+        },
     }))
 }
 
@@ -519,15 +531,21 @@ async fn get_block(context: &Context, params: &[Value]) -> RpcResult {
     if verbosity > 2 {
         return Err(RpcError::params("verbosity must be 0, 1 or 2"));
     }
-    let (block, placement) = core(context, move |core| {
+    let (stored, placement) = core(context, move |core| {
         let chain = core.chain();
         Some((
-            chain.store().block(&id).ok().flatten()?,
+            chain.store().stored_block(&id).ok().flatten()?,
             placement(chain, &id)?,
         ))
     })
     .await?
     .ok_or_else(|| RpcError::new(code::NOT_FOUND, "block not found"))?;
+    let block = match stored {
+        StoredBlock::Full(block) => block,
+        StoredBlock::Pruned(pruned) => {
+            return pruned_block_json(&pruned, &placement, verbosity, context.params.network);
+        }
+    };
     if verbosity == 0 {
         return Ok(json!(encode_base64url(&block.to_bytes())));
     }
@@ -550,6 +568,77 @@ async fn get_block(context: &Context, params: &[Value]) -> RpcResult {
                 .transactions()
                 .iter()
                 .map(|transaction| transaction_json(transaction, network))
+                .collect::<Vec<_>>()
+        )
+    };
+    Ok(object)
+}
+
+/// A block whose witnesses were pruned: everything but the witnesses.
+fn pruned_block_json(
+    block: &PrunedBlock,
+    placement: &Placement,
+    verbosity: u64,
+    network: Network,
+) -> RpcResult {
+    if verbosity == 0 {
+        return Err(RpcError::new(
+            code::BLOCK_PRUNED,
+            "the witnesses of this block were pruned; the whole block no longer exists here",
+        ));
+    }
+    let mut object = header_json(block.header());
+    object["id"] = json!(block.id().to_string());
+    object["size_pruned"] = json!(block.encoded_len());
+    object["witnesses_pruned"] = json!(true);
+    placement_json(placement, &mut object);
+    object["transactions"] = if verbosity == 1 {
+        json!(
+            block
+                .transactions()
+                .iter()
+                .map(|transaction| transaction.txid().to_string())
+                .collect::<Vec<_>>()
+        )
+    } else {
+        json!(
+            block
+                .transactions()
+                .iter()
+                .zip(block.witness_hashes())
+                .map(|(transaction, witness_hash)| {
+                    let outputs: Vec<Value> = transaction
+                        .outputs()
+                        .iter()
+                        .enumerate()
+                        .map(|(index, output)| {
+                            json!({
+                                "index": index,
+                                "amount_sat": format_sat(output.amount),
+                                "wallet_id": output.wallet_id.to_string(),
+                                "address": Address::new(network, output.wallet_id).to_string(),
+                            })
+                        })
+                        .collect();
+                    let inputs: Vec<Value> = transaction
+                        .inputs()
+                        .iter()
+                        .map(|input| {
+                            json!({
+                                "txid": input.previous_output.txid.to_string(),
+                                "index": input.previous_output.index,
+                                "witness_index": input.witness_index,
+                            })
+                        })
+                        .collect();
+                    json!({
+                        "txid": transaction.txid().to_string(),
+                        "witness_hash": witness_hash.to_string(),
+                        "coinbase": transaction.is_coinbase(),
+                        "inputs": inputs,
+                        "outputs": outputs,
+                    })
+                })
                 .collect::<Vec<_>>()
         )
     };
@@ -611,7 +700,7 @@ async fn get_tx_out(context: &Context, params: &[Value]) -> RpcResult {
     let outpoint = OutPoint { txid, index };
     let found = core(context, move |core| {
         let chain = core.chain();
-        Some((*chain.utxo().get(&outpoint)?, chain.tip()?.height))
+        Some((chain.coin(&outpoint).ok().flatten()?, chain.tip()?.height))
     })
     .await?;
     Ok(found.map_or(Value::Null, |(coin, tip)| {
@@ -620,6 +709,16 @@ async fn get_tx_out(context: &Context, params: &[Value]) -> RpcResult {
 }
 
 // ---------------------------------------------------------- transactions
+
+fn chain_error(error: &ChainError) -> RpcError {
+    match error {
+        ChainError::Storage(StorageError::NoWalletIndex) => RpcError::new(
+            code::UNAVAILABLE,
+            "the wallet index is off (--no-wallet-index)",
+        ),
+        other => RpcError::new(code::INTERNAL_ERROR, other.to_string()),
+    }
+}
 
 fn mempool_error(error: &MempoolError) -> RpcError {
     let code = match error {
@@ -948,19 +1047,20 @@ async fn list_unspent(context: &Context, params: &[Value]) -> RpcResult {
     let limit = limit_param(params, 2)?;
     let include_mempool = bool_param(params, 3, "include_mempool")?.unwrap_or(false);
     let (coins, tip, more, unconfirmed) = core(context, move |core| {
-        let utxo = core.chain().utxo();
+        let chain = core.chain();
         let mempool = core.mempool();
-        let mut coins: Vec<(OutPoint, Coin, bool)> = wallets
-            .iter()
-            .flat_map(|wallet| utxo.outpoints_of(wallet))
-            .filter(|outpoint| after.is_none_or(|after| **outpoint > after))
-            .filter_map(|outpoint| {
-                utxo.get(outpoint).map(|coin| {
-                    let spent = include_mempool && mempool.spent_by(outpoint).is_some();
-                    (*outpoint, *coin, spent)
-                })
-            })
-            .collect();
+        // Each wallet's coins come in outpoint order from the index; take
+        // one page plus one from each and merge.
+        let mut coins: Vec<(OutPoint, Coin, bool)> = Vec::new();
+        for wallet in &wallets {
+            for (outpoint, coin) in chain
+                .coins_of(wallet, after, limit + 1)
+                .map_err(|error| chain_error(&error))?
+            {
+                let spent = include_mempool && mempool.spent_by(&outpoint).is_some();
+                coins.push((outpoint, coin, spent));
+            }
+        }
         coins.sort_unstable_by_key(|(outpoint, _, _)| *outpoint);
         let more = coins.len() > limit;
         coins.truncate(limit);
@@ -987,14 +1087,14 @@ async fn list_unspent(context: &Context, params: &[Value]) -> RpcResult {
             unconfirmed.sort_unstable_by_key(|(outpoint, _)| *outpoint);
             unconfirmed.truncate(limit);
         }
-        (
+        Ok::<_, RpcError>((
             coins,
             core.chain().tip().map_or(0, |tip| tip.height),
             more,
             unconfirmed,
-        )
+        ))
     })
-    .await?;
+    .await??;
     let next = if more {
         coins
             .last()
@@ -1042,22 +1142,29 @@ async fn get_balance(context: &Context, params: &[Value]) -> RpcResult {
         let tip = chain.tip().map_or(0, |tip| tip.height);
         let (mut mature, mut immature, mut count) = (0_u128, 0_u128, 0_usize);
         for wallet in &wallets {
-            for outpoint in chain.utxo().outpoints_of(wallet) {
-                let Some(coin) = chain.utxo().get(outpoint) else {
-                    continue;
-                };
-                count += 1;
-                let value = u128::from(coin.output.amount.as_satoshis());
-                if coin.is_coinbase && tip.saturating_sub(coin.height) + 1 < maturity {
-                    immature += value;
-                } else {
-                    mature += value;
+            let mut after = None;
+            loop {
+                let page = chain
+                    .coins_of(wallet, after, MAX_PAGE)
+                    .map_err(|error| chain_error(&error))?;
+                for (_, coin) in &page {
+                    count += 1;
+                    let value = u128::from(coin.output.amount.as_satoshis());
+                    if coin.is_coinbase && tip.saturating_sub(coin.height) + 1 < maturity {
+                        immature += value;
+                    } else {
+                        mature += value;
+                    }
                 }
+                if page.len() < MAX_PAGE {
+                    break;
+                }
+                after = page.last().map(|(outpoint, _)| *outpoint);
             }
         }
-        (mature, immature, count)
+        Ok::<_, RpcError>((mature, immature, count))
     })
-    .await?;
+    .await??;
     Ok(json!({
         "mature_sat": format_sat_u128(mature),
         "immature_sat": format_sat_u128(immature),

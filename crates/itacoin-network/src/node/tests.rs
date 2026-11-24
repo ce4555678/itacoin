@@ -201,8 +201,8 @@ async fn partitioned_nodes_converge_on_the_heavier_chain() {
     assert!(eventually(|| async { a.tip().await == heavier }).await);
     assert_eq!(a.tip().await.unwrap().height, 4);
     let totals = (
-        a.call(|core| core.chain.utxo().total_value()).await,
-        b.call(|core| core.chain.utxo().total_value()).await,
+        a.call(|core| core.chain.utxo_stats().total_value).await,
+        b.call(|core| core.chain.utxo_stats().total_value).await,
     );
     assert_eq!(totals.0, totals.1);
     a.shutdown().await;

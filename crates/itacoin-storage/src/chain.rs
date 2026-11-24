@@ -13,19 +13,20 @@
 
 use core::{cmp::Reverse, fmt};
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     path::Path,
 };
 
-use itacoin_blockchain::{Block, BlockHeader, HEADER_BYTES, Tip, UtxoError, UtxoSet};
+use itacoin_blockchain::{Block, BlockHeader, Coin, HEADER_BYTES, Tip, UtxoError, UtxoSet};
 use itacoin_codec::{Decode, Encode, Reader, Writer};
 use itacoin_consensus::{
     AsertAnchor, ConsensusError, ConsensusParams, HeaderContext, MEDIAN_TIME_SPAN, U256,
     block_work, check_header, median_time_past, next_target,
 };
-use itacoin_primitives::{BlockId, Hash256};
+use itacoin_primitives::{BlockId, Hash256, WalletId};
+use itacoin_transaction::OutPoint;
 
-use crate::{ChainStore, StorageError};
+use crate::{ChainStore, StorageError, StoreCoins, StoreOptions, StoredBlock, UtxoStats};
 
 const ENTRY_BYTES: usize = HEADER_BYTES + 8 + 32 + 8 + 1;
 
@@ -102,9 +103,18 @@ impl Chain {
     /// genesis block if it is new, and finishes any interrupted
     /// reorganization.
     pub fn open(path: &Path, params: ConsensusParams) -> Result<Self, ChainError> {
+        Self::open_with(path, params, StoreOptions::default())
+    }
+
+    /// [`Chain::open`] with explicit store options.
+    pub fn open_with(
+        path: &Path,
+        params: ConsensusParams,
+        options: StoreOptions,
+    ) -> Result<Self, ChainError> {
         let genesis = params.genesis();
         let chain_id = genesis.id().into_hash();
-        let store = ChainStore::open(path, chain_id)?;
+        let store = ChainStore::open_with(path, chain_id, options)?;
         let mut index = HashMap::new();
         for (id, bytes) in store.index_entries()? {
             index.insert(id, IndexEntry::from_bytes(&bytes)?);
@@ -133,6 +143,7 @@ impl Chain {
             chain.insert(&genesis, entry)?;
         }
         chain.activate_best_chain()?;
+        chain.prune()?;
         Ok(chain)
     }
 
@@ -154,10 +165,47 @@ impl Chain {
         self.store.tip()
     }
 
-    /// Returns the unspent-output set at the active tip.
+    /// Looks up an unspent output at the active tip.
+    pub fn coin(&self, outpoint: &OutPoint) -> Result<Option<Coin>, ChainError> {
+        Ok(self.store.coin(outpoint)?)
+    }
+
+    /// A coin source over the active tip, for the mempool.
     #[must_use]
-    pub const fn utxo(&self) -> &UtxoSet {
-        self.store.utxo()
+    pub const fn coins(&self) -> StoreCoins<'_> {
+        self.store.coins()
+    }
+
+    /// Unspent outputs paying `wallet_id`, paginated by outpoint.
+    pub fn coins_of(
+        &self,
+        wallet_id: &WalletId,
+        after: Option<OutPoint>,
+        limit: usize,
+    ) -> Result<Vec<(OutPoint, Coin)>, ChainError> {
+        Ok(self.store.coins_of(wallet_id, after, limit)?)
+    }
+
+    /// Totals of the unspent-output set.
+    #[must_use]
+    pub const fn utxo_stats(&self) -> UtxoStats {
+        self.store.utxo_stats()
+    }
+
+    /// The whole unspent-output set, loaded from disk. Linear; for tests and
+    /// audits.
+    pub fn snapshot(&self) -> Result<UtxoSet, ChainError> {
+        Ok(self.store.snapshot()?)
+    }
+
+    /// Switches batched commits for initial sync on or off.
+    pub fn set_bulk(&mut self, bulk: bool) -> Result<(), ChainError> {
+        Ok(self.store.set_bulk(bulk)?)
+    }
+
+    /// Makes every commit so far durable.
+    pub fn flush(&mut self) -> Result<(), ChainError> {
+        Ok(self.store.flush()?)
     }
 
     /// Returns the underlying store, for block and height queries.
@@ -215,7 +263,18 @@ impl Chain {
     pub fn submit_block(&mut self, block: &Block, now: u64) -> Result<SubmitOutcome, ChainError> {
         let block_id = block.id();
         if self.index.contains_key(&block_id) {
-            return Ok(SubmitOutcome::Duplicate);
+            // A block whose data was pruned away can be stored again.
+            if self.store.stored_block(&block_id)?.is_some() || self.index[&block_id].invalid {
+                return Ok(SubmitOutcome::Duplicate);
+            }
+            self.store.store_body(&StoredBlock::Full(block.clone()))?;
+            self.activate_best_chain()?;
+            self.prune()?;
+            return Ok(if self.tip().map(|tip| tip.block_id) == Some(block_id) {
+                SubmitOutcome::NewTip
+            } else {
+                SubmitOutcome::Duplicate
+            });
         }
         let parent_id = block.header().prev_block;
         let parent = *self
@@ -253,6 +312,7 @@ impl Chain {
         self.insert(block, entry)?;
 
         let failures = self.activate_best_chain()?;
+        self.prune()?;
         if let Some(error) = failures.get(&block_id) {
             return Err(ChainError::InvalidBlock {
                 block_id,
@@ -293,14 +353,20 @@ impl Chain {
         median_time_past(&timestamps)
     }
 
-    /// The valid block with the most work; the earliest arrival wins ties.
-    fn best_candidate(&self) -> BlockId {
+    /// The valid block with the most work, skipping blocks whose data is
+    /// gone; the earliest arrival wins ties.
+    fn best_candidate(&self, unavailable: &HashSet<BlockId>) -> BlockId {
         self.index
             .iter()
-            .filter(|(_, entry)| !entry.invalid)
+            .filter(|(id, entry)| !entry.invalid && !unavailable.contains(id))
             .max_by_key(|(_, entry)| (entry.chain_work, Reverse(entry.sequence)))
-            .map(|(id, _)| *id)
-            .expect("the genesis block is always valid")
+            .map_or_else(
+                || {
+                    self.tip()
+                        .map_or(BlockId::new(Hash256::new([0; 32])), |tip| tip.block_id)
+                },
+                |(id, _)| *id,
+            )
     }
 
     fn parent(&self, block_id: &BlockId) -> BlockId {
@@ -349,14 +415,28 @@ impl Chain {
     /// found invalid on the way, with the reason.
     fn activate_best_chain(&mut self) -> Result<HashMap<BlockId, UtxoError>, ChainError> {
         let mut failures = HashMap::new();
+        let mut unavailable = HashSet::new();
         loop {
-            let best = self.best_candidate();
+            let best = self.best_candidate(&unavailable);
             let tip = self.tip().map(|tip| tip.block_id);
-            if tip == Some(best) {
+            if tip == Some(best) || !self.index.contains_key(&best) {
                 return Ok(failures);
             }
             let fork = self.fork_point(tip, best);
             let path = self.path(fork, best);
+            // A branch with a block whose data was pruned away (a deep side
+            // chain) cannot be activated until the block is stored again.
+            let mut missing = false;
+            for block_id in &path {
+                if self.store.stored_block(block_id)?.is_none() {
+                    missing = true;
+                    break;
+                }
+            }
+            if missing {
+                unavailable.insert(best);
+                continue;
+            }
             // Defense in depth: a candidate above an invalid block is itself
             // invalid, even if its flag was never set. Without this check the
             // loop would retry the same branch forever.
@@ -371,12 +451,12 @@ impl Chain {
             for block_id in &path {
                 let block = self
                     .store
-                    .block(block_id)?
+                    .stored_block(block_id)?
                     .ok_or(ChainError::Corrupt("indexed block missing"))?;
                 let rules = self.rules(block.height());
-                match self.store.apply_block(&block, &rules) {
+                match self.store.apply_stored(&block, &rules) {
                     Ok(()) => {}
-                    Err(StorageError::Utxo(error)) => {
+                    Err(StorageError::Utxo(error)) if error.is_invalid_block() => {
                         // The tip stays at the last valid block of this
                         // branch; the next iteration picks the best valid
                         // chain again and reorganizes to it.
@@ -388,6 +468,13 @@ impl Chain {
                 }
             }
         }
+    }
+
+    /// Prunes witnesses of active blocks below the prune depth, a batch at a
+    /// time. Does nothing in archive mode.
+    fn prune(&mut self) -> Result<(), ChainError> {
+        self.store.prune()?;
+        Ok(())
     }
 
     /// Marks a block and all of its known descendants invalid, durably.
@@ -412,6 +499,125 @@ impl Chain {
         self.store.store_index_entries(&updates)?;
         Ok(())
     }
+}
+
+/// What a reindexation did.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReindexReport {
+    /// Blocks applied to the new chain state.
+    pub applied: u64,
+    /// Of those, blocks with pruned witnesses (signatures not rechecked).
+    pub pruned: u64,
+    /// Side-chain blocks copied.
+    pub side_blocks: u64,
+}
+
+/// Rebuilds the chain state at `path` from its stored blocks (section 6 of
+/// `docs/STORAGE_PROPOSAL.md`).
+///
+/// A new store is built next to the old one, then swapped in by an atomic
+/// rename, so a crash leaves the old store untouched. Blocks are applied
+/// along the valid chain with the most work in the header index. Header
+/// rules, proof of work included, are not checked again: the headers were
+/// validated when stored, and every body is bound to its header by its
+/// Merkle roots.
+pub fn reindex(
+    path: &Path,
+    params: ConsensusParams,
+    options: StoreOptions,
+) -> Result<ReindexReport, ChainError> {
+    let chain_id = params.genesis().id().into_hash();
+    let mut temporary_name = path
+        .file_name()
+        .ok_or(ChainError::Corrupt("store path has no file name"))?
+        .to_owned();
+    temporary_name.push(".reindex");
+    let temporary = path.with_file_name(temporary_name);
+    let io =
+        |error: std::io::Error| ChainError::Storage(StorageError::Database(redb::Error::Io(error)));
+    match std::fs::remove_file(&temporary) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(io(error)),
+        _ => {}
+    }
+
+    let mut report = ReindexReport {
+        applied: 0,
+        pruned: 0,
+        side_blocks: 0,
+    };
+    {
+        let old = ChainStore::open_with(path, chain_id, options)?;
+        let raw = old.index_entries()?;
+        let mut entries = HashMap::with_capacity(raw.len());
+        for (id, bytes) in &raw {
+            entries.insert(*id, IndexEntry::from_bytes(bytes)?);
+        }
+        let mut available =
+            |id: &BlockId| -> Result<bool, ChainError> { Ok(old.stored_block(id)?.is_some()) };
+        // The valid chain with the most work whose blocks are all stored.
+        let mut candidates: Vec<(&BlockId, &IndexEntry)> =
+            entries.iter().filter(|(_, entry)| !entry.invalid).collect();
+        candidates.sort_by_key(|(_, entry)| (Reverse(entry.chain_work), entry.sequence));
+        let mut chosen = None;
+        'candidates: for (id, _) in candidates {
+            let mut path_ids = Vec::new();
+            let mut current = *id;
+            loop {
+                let entry = entries
+                    .get(&current)
+                    .ok_or(ChainError::Corrupt("index entry without a parent"))?;
+                if entry.invalid || !available(&current)? {
+                    continue 'candidates;
+                }
+                path_ids.push(current);
+                if entry.height == 0 {
+                    break;
+                }
+                current = entry.header.prev_block;
+            }
+            path_ids.reverse();
+            chosen = Some(path_ids);
+            break;
+        }
+        let path_ids = chosen.ok_or(ChainError::Corrupt("no complete chain to reindex"))?;
+
+        let mut new = ChainStore::open_with(&temporary, chain_id, options)?;
+        new.set_bulk(true)?;
+        new.store_index_entries(&raw)?;
+        let on_path: HashSet<BlockId> = path_ids.iter().copied().collect();
+        for id in &path_ids {
+            let block = old
+                .stored_block(id)?
+                .ok_or(ChainError::Corrupt("block vanished during reindex"))?;
+            if matches!(block, StoredBlock::Pruned(_)) {
+                report.pruned += 1;
+            }
+            new.store_body(&block)?;
+            let rules = params.block_rules(chain_id, block.height());
+            new.apply_stored(&block, &rules)?;
+            report.applied += 1;
+        }
+        for id in entries.keys().filter(|id| !on_path.contains(id)) {
+            if let Some(block) = old.stored_block(id)? {
+                new.store_body(&block)?;
+                report.side_blocks += 1;
+            }
+        }
+        new.flush()?;
+        let _ = &mut available;
+    }
+    std::fs::rename(&temporary, path).map_err(io)?;
+    #[cfg(unix)]
+    {
+        let parent = match path.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent,
+            _ => Path::new("."),
+        };
+        std::fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(io)?;
+    }
+    Ok(report)
 }
 
 impl fmt::Debug for Chain {

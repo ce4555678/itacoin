@@ -21,6 +21,7 @@ itacoin-network = { path = "../itacoin-network" }
 itacoin-primitives = { path = "../itacoin-primitives" }
 itacoin-process = { path = "../itacoin-process" }
 itacoin-rpc = { path = "../itacoin-rpc" }
+itacoin-storage = { path = "../itacoin-storage" }
 serde.workspace = true
 tokio = { workspace = true, features = ["signal"] }
 toml.workspace = true

@@ -1,4 +1,4 @@
-use itacoin_blockchain::{BlockHeader, Coin, Tip};
+use itacoin_blockchain::{BlockHeader, Coin, Tip, UtxoSet};
 use itacoin_crypto::{KeyPair, SigningDomain};
 use itacoin_primitives::{BlockId, COIN, WalletId};
 use itacoin_transaction::{CoinbaseTransaction, Input, Output, UnsignedTransaction, Witness};
@@ -58,7 +58,7 @@ fn utxo(key: &KeyPair, count: u8) -> UtxoSet {
 
 fn view(utxo: &UtxoSet) -> ChainView<'_> {
     ChainView {
-        utxo,
+        coins: utxo,
         chain_id: CHAIN,
         next_height: 11,
         coinbase_maturity: 100,

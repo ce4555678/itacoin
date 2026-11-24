@@ -13,10 +13,14 @@ use itacoin_crypto::{CryptoError, block_hash, merkle_root};
 use itacoin_primitives::{BlockId, Hash256};
 use itacoin_transaction::{MIN_TX_BYTES, Transaction, TransactionError};
 
+pub mod pruned;
 pub mod utxo;
 
+pub use pruned::PrunedBlock;
 pub use utxo::{
-    BlockRules, BlockUndo, COIN_BYTES, Coin, Tip, UtxoError, UtxoSet, created_outpoints,
+    BlockRules, BlockShape, BlockUndo, BodyTransaction, COIN_BYTES, Coin, CoinSource, SourceError,
+    Tip, UtxoDelta, UtxoError, UtxoSet, created_outpoints, created_outpoints_of, revert_delta,
+    validate_block,
 };
 
 /// The only block version this release accepts.

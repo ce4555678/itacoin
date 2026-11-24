@@ -12,6 +12,9 @@ use itacoin_consensus::ConsensusParams;
 use itacoin_network::node::default_port;
 use itacoin_primitives::{Address, Network, WalletId};
 use itacoin_rpc::{IpNet, RpcAuth, default_rpc_port, parse_network};
+use itacoin_storage::{
+    DEFAULT_COIN_CACHE_BYTES, MIN_COIN_CACHE_BYTES, MIN_PRUNE_DEPTH, StoreOptions,
+};
 use serde::Deserialize;
 
 /// Name of the optional configuration file inside the data directory.
@@ -73,6 +76,26 @@ pub struct Cli {
     /// Log filter, such as `info` or `info,itacoin_network=debug`.
     #[arg(long)]
     pub log_level: Option<String>,
+    /// Memory for the coin cache, in MiB (default 300).
+    #[arg(long)]
+    pub coin_cache: Option<usize>,
+    /// Prune the witnesses of blocks deeper than this many blocks (default
+    /// 2880, minimum 288). One-way: the store cannot be un-pruned.
+    #[arg(long, num_args = 0..=1, default_missing_value = "2880")]
+    pub prune_witnesses: Option<u64>,
+    /// Do not keep the index of coins by address (disables listunspent and
+    /// getbalance).
+    #[arg(long)]
+    pub no_wallet_index: bool,
+    /// Rebuild the chain state from the stored blocks, then start.
+    #[arg(long)]
+    pub reindex: bool,
+    /// Recount every coin against the stored totals at start.
+    #[arg(long)]
+    pub check_utxo: bool,
+    /// Check the last N blocks against their undo data at start.
+    #[arg(long)]
+    pub check_blocks: Option<u64>,
 }
 
 /// The configuration file: the same options, minus `network` and
@@ -99,6 +122,9 @@ pub struct FileConfig {
     mine_threads: Option<usize>,
     mine_without_peers: Option<bool>,
     log_level: Option<String>,
+    coin_cache: Option<usize>,
+    prune_witnesses: Option<u64>,
+    no_wallet_index: Option<bool>,
 }
 
 impl FileConfig {
@@ -151,6 +177,14 @@ pub struct Settings {
     pub mining: Option<MiningSettings>,
     /// Log filter.
     pub log_level: String,
+    /// Chain store options.
+    pub store: StoreOptions,
+    /// Rebuild the chain state before starting.
+    pub reindex: bool,
+    /// Recount the coins at start.
+    pub check_utxo: bool,
+    /// Blocks to check against their undo data at start.
+    pub check_blocks: Option<u64>,
 }
 
 /// Resolves the network and its data directory from the command line.
@@ -282,6 +316,31 @@ pub fn resolve(
         }
     };
 
+    let coin_cache =
+        cli.coin_cache
+            .or(file.coin_cache)
+            .map_or(Ok(DEFAULT_COIN_CACHE_BYTES), |mib| {
+                mib.checked_mul(1024 * 1024)
+                    .filter(|bytes| *bytes >= MIN_COIN_CACHE_BYTES)
+                    .ok_or_else(|| {
+                        format!(
+                            "--coin-cache must be at least {} MiB",
+                            MIN_COIN_CACHE_BYTES / 1024 / 1024
+                        )
+                    })
+            })?;
+    let prune_depth = cli.prune_witnesses.or(file.prune_witnesses);
+    if prune_depth.is_some_and(|depth| depth < MIN_PRUNE_DEPTH) {
+        return Err(format!(
+            "--prune-witnesses must be at least {MIN_PRUNE_DEPTH} blocks"
+        ));
+    }
+    let store = StoreOptions {
+        coin_cache_bytes: coin_cache,
+        wallet_index: !(cli.no_wallet_index || file.no_wallet_index.unwrap_or(false)),
+        prune_depth,
+    };
+
     Ok(Settings {
         params,
         data_dir,
@@ -297,6 +356,10 @@ pub fn resolve(
             .log_level
             .or(file.log_level)
             .unwrap_or_else(|| "info".into()),
+        store,
+        reindex: cli.reindex,
+        check_utxo: cli.check_utxo,
+        check_blocks: cli.check_blocks,
     })
 }
 
@@ -453,5 +516,40 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn storage_options() {
+        let base = ["--network", "testnet", "--datadir", "/d"];
+        let with = |extra: &[&str], file: &str| {
+            let args: Vec<&str> = base.iter().chain(extra).copied().collect();
+            settings(&args, file)
+        };
+        assert_eq!(with(&[], "").unwrap().store, StoreOptions::default());
+        assert_eq!(
+            with(&["--prune-witnesses"], "").unwrap().store.prune_depth,
+            Some(2_880)
+        );
+        let custom = with(
+            &[
+                "--prune-witnesses",
+                "500",
+                "--coin-cache",
+                "64",
+                "--no-wallet-index",
+                "--reindex",
+            ],
+            "",
+        )
+        .unwrap();
+        assert_eq!(custom.store.prune_depth, Some(500));
+        assert_eq!(custom.store.coin_cache_bytes, 64 * 1024 * 1024);
+        assert!(!custom.store.wallet_index);
+        assert!(custom.reindex);
+        let file = with(&[], "prune-witnesses = 300\nno-wallet-index = true").unwrap();
+        assert_eq!(file.store.prune_depth, Some(300));
+        assert!(!file.store.wallet_index);
+        assert!(with(&["--prune-witnesses", "100"], "").is_err());
+        assert!(with(&["--coin-cache", "1"], "").is_err());
     }
 }

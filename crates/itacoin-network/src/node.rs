@@ -21,7 +21,7 @@ use itacoin_blockchain::{Block, Tip};
 use itacoin_consensus::{ConsensusError, ConsensusParams, U256};
 use itacoin_mempool::{Added, ChainView, Mempool, MempoolError, Policy};
 use itacoin_primitives::{BlockId, Hash256, Network};
-use itacoin_storage::{Chain, ChainError, SubmitOutcome};
+use itacoin_storage::{Chain, ChainError, StoreOptions, SubmitOutcome};
 use itacoin_transaction::Transaction;
 use rand_core::{OsRng, RngCore};
 use tokio::{
@@ -38,7 +38,7 @@ use crate::{
     limits::{Discouraged, TokenBucket},
     message::{
         AddrEntry, InvItem, InvKind, MAX_ADDR, MAX_HEADERS, MAX_INV, Message, NetAddress,
-        PROTOCOL_VERSION, SERVICE_NETWORK, Version,
+        PROTOCOL_VERSION, SERVICE_NETWORK, SERVICE_WITNESS_PRUNED, Version,
     },
     transport,
 };
@@ -88,6 +88,8 @@ pub struct NodeConfig {
     pub min_chain_work: U256,
     /// User agent sent in `version`.
     pub user_agent: String,
+    /// Chain store options: coin cache, wallet index and pruning.
+    pub store: StoreOptions,
 }
 
 impl NodeConfig {
@@ -111,6 +113,7 @@ impl NodeConfig {
             mempool_policy: Policy::default(),
             min_chain_work: U256::ZERO,
             user_agent: "/itacoin:0.1.0/".into(),
+            store: StoreOptions::default(),
         }
     }
 }
@@ -149,6 +152,8 @@ const TICK: Duration = Duration::from_millis(200);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_KNOWN_INVENTORY: usize = 50_000;
 const MAX_RECENT_REJECTS: usize = 50_000;
+/// Blocks below its announced tip a pruning peer is asked for.
+const PRUNED_PEER_SERVES: u64 = 288;
 
 enum Event {
     Inbound(TcpStream, SocketAddr),
@@ -701,7 +706,13 @@ impl Core {
             .is_some_and(|state| !matches!(state.kind, ConnKind::BlockRelay | ConnKind::Feeler));
         let version = Version {
             protocol: PROTOCOL_VERSION,
-            services: SERVICE_NETWORK,
+            // A pruning node serves only recent blocks (section 5.4 of the
+            // storage proposal).
+            services: if self.config.store.prune_depth.is_some() {
+                SERVICE_WITNESS_PRUNED
+            } else {
+                SERVICE_NETWORK
+            },
             height: self.chain.tip().map_or(0, |tip| tip.height),
             timestamp: unix_now(),
             nonce: self.nonce,
@@ -967,6 +978,19 @@ impl Core {
             return;
         };
         let outcome = self.tree.process(&mut state.sync, headers, now);
+        // An empty answer to our locator means the peer has nothing beyond
+        // our chain: it holds our best chain up to the height it announced.
+        // Without this, a peer that joins after the headers are known is
+        // never asked for blocks.
+        if headers.is_empty()
+            && let Some(version) = state.version.as_ref()
+        {
+            let (best, node) = self.tree.best();
+            let height = version.height.min(node.height);
+            if let Some(known) = self.tree.ancestor_at(best, height) {
+                state.sync.best_known = Some(known);
+            }
+        }
         match outcome {
             Ok(HeaderOutcome::Stored { last, full, .. }) => {
                 state.unconnecting = 0;
@@ -1240,7 +1264,7 @@ impl Core {
         }
         let now = unix_now();
         let view = ChainView {
-            utxo: self.chain.utxo(),
+            coins: &self.chain.coins(),
             chain_id: self.chain.chain_id(),
             next_height: self.chain.tip().map_or(0, |tip| tip.height + 1),
             coinbase_maturity: self.config.params.coinbase_maturity,
@@ -1333,6 +1357,12 @@ impl Core {
                 peer.last_block = Some(Instant::now());
             }
             let tip_before = self.chain.tip();
+            // Batch commits while catching up (section 4 of the storage
+            // proposal); every block is durable once in sync.
+            let bulk = self.is_initial_block_download();
+            if let Err(error) = self.chain.set_bulk(bulk) {
+                tracing::error!("could not change the commit mode: {error}");
+            }
             let result = self.chain.submit_block(&block, unix_now());
             if verdict.is_none() {
                 verdict = Some(match &result {
@@ -1470,7 +1500,7 @@ impl Core {
             self.mempool.remove_confirmed(block);
         }
         let view = ChainView {
-            utxo: self.chain.utxo(),
+            coins: &self.chain.coins(),
             chain_id: self.chain.chain_id(),
             next_height: new.height + 1,
             coinbase_maturity: self.config.params.coinbase_maturity,
@@ -1524,6 +1554,7 @@ impl Core {
             let candidate = self.peers.iter().find(|(peer_id, peer)| {
                 peer.ready
                     && !matches!(peer.kind, ConnKind::Feeler)
+                    && peer.serves_height(height)
                     && peer.in_flight.len() + requests.get(*peer_id).map_or(0, Vec::len)
                         < MAX_BLOCKS_IN_FLIGHT
                     && peer
@@ -1697,6 +1728,9 @@ impl Core {
     }
 
     fn shutdown(&mut self) {
+        if let Err(error) = self.chain.flush() {
+            tracing::error!("could not flush the chain store: {error}");
+        }
         self.save_peers();
         self.save_anchors();
         let ids: Vec<PeerId> = self.peers.keys().copied().collect();
@@ -1707,6 +1741,16 @@ impl Core {
 }
 
 impl Peer {
+    /// Whether the peer can serve the block at `height`: a full node serves
+    /// every block, a pruning one only the recent ones.
+    fn serves_height(&self, height: u64) -> bool {
+        self.version.as_ref().is_some_and(|version| {
+            version.services & SERVICE_NETWORK != 0
+                || (version.services & SERVICE_WITNESS_PRUNED != 0
+                    && height.saturating_add(PRUNED_PEER_SERVES) > version.height)
+        })
+    }
+
     fn wants_high_bandwidth_from_us(&self) -> bool {
         self.asked_high_bandwidth
     }
@@ -1884,8 +1928,12 @@ impl NodeHandle {
 /// Starts a node on the current tokio runtime.
 pub async fn start(config: NodeConfig) -> Result<NodeHandle, StartError> {
     std::fs::create_dir_all(&config.data_dir).map_err(StartError::Io)?;
-    let chain = Chain::open(&config.data_dir.join("chain.redb"), config.params)
-        .map_err(StartError::Chain)?;
+    let chain = Chain::open_with(
+        &config.data_dir.join("chain.redb"),
+        config.params,
+        config.store,
+    )
+    .map_err(StartError::Chain)?;
     let tree = HeaderTree::new(
         config.params,
         chain.chain_id(),

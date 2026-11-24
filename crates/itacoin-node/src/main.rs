@@ -101,23 +101,57 @@ async fn run(settings: Settings) -> Result<(), String> {
     if let Some(max) = settings.max_inbound {
         node_config.max_inbound = max;
     }
-    let handle = start(node_config)
-        .await
-        .map_err(|error| format!("could not start the node: {error:?}"))?;
+    node_config.store = settings.store;
+    if settings.reindex {
+        let path = settings.data_dir.join("chain.redb");
+        tracing::info!("reindexing {}", path.display());
+        let started = Instant::now();
+        let options = settings.store;
+        let report =
+            tokio::task::spawn_blocking(move || itacoin_storage::reindex(&path, params, options))
+                .await
+                .map_err(|error| format!("reindex failed: {error}"))?
+                .map_err(|error| format!("reindex failed: {error}"))?;
+        tracing::info!(
+            "reindexed {} blocks ({} with pruned witnesses, {} side blocks) in {:?}",
+            report.applied,
+            report.pruned,
+            report.side_blocks,
+            started.elapsed()
+        );
+    }
+    let handle = start(node_config).await.map_err(|error| {
+        format!(
+            "could not start the node: {error}; if the chain state is damaged, restart \
+                 with --reindex"
+        )
+    })?;
 
-    let verified = handle
-        .call(|core| {
-            core.chain()
-                .store()
-                .verify()
-                .map_err(|error| error.to_string())
+    // The cheap invariants were checked when the store opened; the linear
+    // audits run only on request.
+    let check_utxo = settings.check_utxo;
+    let check_blocks = settings.check_blocks;
+    let checked = handle
+        .call(move |core| {
+            let store = core.chain().store();
+            if check_utxo {
+                let stats = store.check_utxo().map_err(|error| error.to_string())?;
+                tracing::info!("UTXO set checked: {} coins", stats.coins);
+            }
+            if let Some(count) = check_blocks {
+                let checked = store
+                    .check_blocks(count)
+                    .map_err(|error| error.to_string())?;
+                tracing::info!("{checked} blocks checked against their undo data");
+            }
+            Ok::<(), String>(())
         })
         .await
         .unwrap_or_else(|| Err("the node stopped".into()));
-    if let Err(error) = verified {
+    if let Err(error) = checked {
         handle.shutdown().await;
         return Err(format!(
-            "the chain state failed verification ({error}); it may need a reindex"
+            "the chain state failed verification ({error}); restart with --reindex"
         ));
     }
     let tip = handle.tip().await;

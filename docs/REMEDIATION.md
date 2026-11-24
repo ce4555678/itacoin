@@ -53,11 +53,10 @@ cargo +nightly fuzz run encrypted_wallet -- -max_total_time=60
 
 1. Pendências do [nó](NODE_PROPOSAL.md#ainda-não-implementado) e da
    [carteira](WALLET_PROPOSAL.md#ainda-não-implementado):
-   `testmempoolaccept`, índice de transações, `--reindex`, notificações,
-   Stratum, exportação de endereços e pagamentos múltiplos.
+   `testmempoolaccept`, índice de transações, notificações, Stratum,
+   exportação de endereços e pagamentos múltiplos; e do
+   [storage](STORAGE_PROPOSAL.md#ainda-não-implementado).
 2. Pendências da [rede](NETWORK_PROPOSAL.md#ainda-não-implementado): sementes
    DNS, Tor, anúncio do próprio endereço, limite de banda histórico, rede
    simulada e revisão criptográfica do handshake.
-3. `ChainStore` mantém todo o UTXO set em memória e guarda todos os blocos;
-   cache limitado e poda de testemunhas (requisito 1.9) ficam para depois.
-4. Fuzzing contínuo (OSS-Fuzz ou execução longa agendada), além do job curto do CI.
+3. Fuzzing contínuo (OSS-Fuzz ou execução longa agendada), além do job curto do CI.

@@ -10,7 +10,7 @@
 use core::fmt;
 use std::collections::{HashMap, HashSet};
 
-use itacoin_blockchain::{Block, UtxoSet};
+use itacoin_blockchain::{Block, CoinSource};
 use itacoin_codec::Encode;
 use itacoin_primitives::{Amount, Hash256, TransactionId};
 use itacoin_transaction::{NormalTransaction, OutPoint, Transaction, TransactionError};
@@ -52,16 +52,26 @@ impl Default for Policy {
 }
 
 /// The chain state a transaction is checked against.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 pub struct ChainView<'a> {
     /// Unspent outputs at the active tip.
-    pub utxo: &'a UtxoSet,
+    pub coins: &'a dyn CoinSource,
     /// The network's chain id.
     pub chain_id: Hash256,
     /// Height of the next block.
     pub next_height: u64,
     /// Blocks a coinbase output must wait before it can be spent.
     pub coinbase_maturity: u64,
+}
+
+impl core::fmt::Debug for ChainView<'_> {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("ChainView")
+            .field("chain_id", &self.chain_id)
+            .field("next_height", &self.next_height)
+            .finish_non_exhaustive()
+    }
 }
 
 /// A transaction in the pool.
@@ -357,7 +367,11 @@ impl Mempool {
                     }
                     None => return Err(MempoolError::MissingInputs),
                 }
-            } else if let Some(coin) = view.utxo.get(&outpoint) {
+            } else if let Some(coin) = view
+                .coins
+                .coin(&outpoint)
+                .map_err(|_| MempoolError::Unavailable)?
+            {
                 if coin.is_coinbase
                     && view.next_height.saturating_sub(coin.height) < view.coinbase_maturity
                 {
@@ -743,6 +757,8 @@ pub enum MempoolError {
     TooManyDescendants,
     /// The pool is full and the fee rate is too low to stay.
     MempoolFull,
+    /// The chain state could not be read.
+    Unavailable,
 }
 
 impl fmt::Display for MempoolError {
@@ -760,6 +776,7 @@ impl fmt::Display for MempoolError {
             Self::TooManyAncestors => formatter.write_str("too many unconfirmed ancestors"),
             Self::TooManyDescendants => formatter.write_str("too many unconfirmed descendants"),
             Self::MempoolFull => formatter.write_str("mempool full"),
+            Self::Unavailable => formatter.write_str("the chain state could not be read"),
         }
     }
 }

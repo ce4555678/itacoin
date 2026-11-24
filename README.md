@@ -16,7 +16,10 @@ mempool com RBF e *compact blocks*. O [nó](docs/NODE_PROPOSAL.md)
 `itacoin-node` junta rede, JSON-RPC e um minerador embutido de várias
 threads; `itacoin-cli` é o cliente do RPC. A [carteira](docs/WALLET_PROPOSAL.md)
 `itacoin-wallet` deriva todas as chaves de um segredo mestre com backup
-`itcseed1…` e monta, assina e envia transações pelo nó. Não está pronto
+`itcseed1…` e monta, assina e envia transações pelo nó. O
+[estado da cadeia](docs/STORAGE_PROPOSAL.md) fica em disco com um cache de
+moedas limitado, e `--prune-witnesses` descarta as testemunhas de blocos
+antigos (≈ 7,6 GB por ano em vez de ≈ 263 GB com blocos cheios). Não está pronto
 para produção ou para guardar fundos reais.
 
 ## Segurança e compatibilidade

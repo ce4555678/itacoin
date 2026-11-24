@@ -142,6 +142,27 @@ impl UnsignedTransaction {
         self.witness_count
     }
 
+    /// Checks value conservation against the spent outputs and returns the
+    /// fee, without looking at witnesses. Used only for blocks this node has
+    /// already validated in full and whose witnesses were pruned.
+    pub fn fee(&self, spent: &[Output]) -> Result<Amount, TransactionError> {
+        if spent.len() != self.inputs.len() {
+            return Err(TransactionError::SpentOutputCount {
+                expected: self.inputs.len(),
+                actual: spent.len(),
+            });
+        }
+        let mut input_total = Amount::ZERO;
+        for output in spent {
+            input_total = input_total
+                .checked_add(output.amount)
+                .map_err(TransactionError::Amount)?;
+        }
+        input_total
+            .checked_sub(self.output_total)
+            .map_err(|_| TransactionError::InsufficientInputs)
+    }
+
     /// Returns the transaction id, which excludes witnesses.
     #[must_use]
     pub fn txid(&self) -> TransactionId {
@@ -410,6 +431,103 @@ impl Transaction {
     #[must_use]
     pub const fn is_coinbase(&self) -> bool {
         matches!(self, Self::Coinbase(_))
+    }
+
+    /// Returns the transaction without its witnesses.
+    #[must_use]
+    pub fn stripped(&self) -> StrippedTransaction {
+        match self {
+            Self::Normal(transaction) => StrippedTransaction::Normal(transaction.unsigned.clone()),
+            Self::Coinbase(coinbase) => StrippedTransaction::Coinbase(coinbase.clone()),
+        }
+    }
+}
+
+/// A transaction without witnesses, as kept for blocks whose witnesses were
+/// pruned (requirement 1.9). Its txid is the same as the full transaction's.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum StrippedTransaction {
+    /// The witness-free part of a normal transaction.
+    Normal(UnsignedTransaction),
+    /// A coinbase, which has no witnesses anyway.
+    Coinbase(CoinbaseTransaction),
+}
+
+impl StrippedTransaction {
+    /// Returns the transaction id.
+    #[must_use]
+    pub fn txid(&self) -> TransactionId {
+        match self {
+            Self::Normal(unsigned) => unsigned.txid(),
+            Self::Coinbase(coinbase) => transaction_hash(&coinbase.to_bytes()),
+        }
+    }
+
+    /// Returns the inputs; empty for a coinbase.
+    #[must_use]
+    pub fn inputs(&self) -> &[Input] {
+        match self {
+            Self::Normal(unsigned) => unsigned.inputs(),
+            Self::Coinbase(_) => &[],
+        }
+    }
+
+    /// Returns the outputs.
+    #[must_use]
+    pub fn outputs(&self) -> &[Output] {
+        match self {
+            Self::Normal(unsigned) => unsigned.outputs(),
+            Self::Coinbase(coinbase) => coinbase.outputs(),
+        }
+    }
+
+    /// Returns whether this is a coinbase.
+    #[must_use]
+    pub const fn is_coinbase(&self) -> bool {
+        matches!(self, Self::Coinbase(_))
+    }
+}
+
+impl Encode for StrippedTransaction {
+    fn encode(&self, writer: &mut Writer) {
+        match self {
+            Self::Normal(unsigned) => unsigned.encode_body(writer),
+            Self::Coinbase(coinbase) => coinbase.encode(writer),
+        }
+    }
+
+    fn encoded_len(&self) -> usize {
+        match self {
+            Self::Normal(unsigned) => unsigned.body_len(),
+            Self::Coinbase(coinbase) => coinbase.encoded_len(),
+        }
+    }
+}
+
+impl Decode for StrippedTransaction {
+    type Error = TransactionError;
+
+    fn decode(reader: &mut Reader<'_>) -> Result<Self, TransactionError> {
+        let version = reader.u16()?;
+        if version != TRANSACTION_VERSION {
+            return Err(TransactionError::UnsupportedVersion(version));
+        }
+        match reader.u8()? {
+            KIND_NORMAL => {
+                let count = reader.count_u16(1..=MAX_TX_INPUTS, INPUT_BYTES)?;
+                let inputs = (0..count)
+                    .map(|_| Input::decode(reader))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let outputs = decode_outputs(reader)?;
+                UnsignedTransaction::new(inputs, outputs).map(Self::Normal)
+            }
+            KIND_COINBASE => {
+                let height = reader.u64()?;
+                let outputs = decode_outputs(reader)?;
+                CoinbaseTransaction::new(height, outputs).map(Self::Coinbase)
+            }
+            kind => Err(TransactionError::UnknownKind(kind)),
+        }
     }
 }
 

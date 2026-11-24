@@ -16,9 +16,11 @@ use core::fmt;
 use std::collections::{HashMap, HashSet};
 
 use itacoin_codec::{Decode, Encode, Reader, Writer};
+use itacoin_primitives::TransactionId;
 use itacoin_primitives::{Amount, AmountError, BlockId, Hash256, WalletId};
 use itacoin_transaction::{
-    OUTPOINT_BYTES, OUTPUT_BYTES, OutPoint, Output, Transaction, TransactionError,
+    Input, OUTPOINT_BYTES, OUTPUT_BYTES, OutPoint, Output, StrippedTransaction, Transaction,
+    TransactionError,
 };
 
 use crate::Block;
@@ -209,7 +211,8 @@ impl UtxoSet {
     /// input spends an existing, mature coin; every transaction passes
     /// [`NormalTransaction::validate_spend`]; no output overwrites an existing
     /// coin; and the coinbase claims at most `subsidy + fees`. On any failure
-    /// the set is unchanged.
+    /// the set is unchanged. The rules live in [`validate_block`], shared with
+    /// the on-disk store.
     ///
     /// [`NormalTransaction::validate_spend`]: itacoin_transaction::NormalTransaction::validate_spend
     pub fn apply_block(
@@ -217,179 +220,396 @@ impl UtxoSet {
         block: &Block,
         rules: &BlockRules,
     ) -> Result<BlockUndo, UtxoError> {
-        let height = block.height();
-        let (expected_parent, expected_height) = match self.tip() {
-            Some(tip) => (tip.block_id, tip.height + 1),
-            None => (BlockId::new(Hash256::new([0; 32])), 0),
-        };
-        if block.header().prev_block != expected_parent {
-            return Err(UtxoError::WrongParent {
-                expected: expected_parent,
-                actual: block.header().prev_block,
-            });
-        }
-        if height != expected_height {
-            return Err(UtxoError::WrongHeight {
-                expected: expected_height,
-                actual: height,
-            });
-        }
-
-        // Stage the block: outputs created earlier in the block may be spent
-        // later in it, and coins from the set are only marked as spent.
-        let mut created: HashMap<OutPoint, Coin> = HashMap::new();
-        let mut spent_from_set: Vec<(OutPoint, Coin)> = Vec::new();
-        let mut spent_in_set: HashSet<OutPoint> = HashSet::new();
-        let mut fees = Amount::ZERO;
-
-        for (index, transaction) in block.transactions().iter().enumerate() {
-            if let Transaction::Normal(normal) = transaction {
-                let mut spent_outputs = Vec::with_capacity(transaction.inputs().len());
-                for (input_index, input) in transaction.inputs().iter().enumerate() {
-                    let outpoint = input.previous_output;
-                    let coin = if let Some(coin) = created.remove(&outpoint) {
-                        coin
-                    } else {
-                        // `Block` already refuses repeated outpoints, so a
-                        // coin from the set is never seen twice here.
-                        let coin = *self.coins.get(&outpoint).ok_or(UtxoError::MissingCoin {
-                            transaction: index,
-                            input: input_index,
-                        })?;
-                        spent_in_set.insert(outpoint);
-                        spent_from_set.push((outpoint, coin));
-                        coin
-                    };
-                    if coin.is_coinbase && height - coin.height < rules.coinbase_maturity {
-                        return Err(UtxoError::ImmatureCoinbase {
-                            transaction: index,
-                            input: input_index,
-                        });
-                    }
-                    spent_outputs.push(coin.output);
-                }
-                let fee = normal
-                    .validate_spend(&rules.chain_id, &spent_outputs)
-                    .map_err(|error| UtxoError::Transaction {
-                        transaction: index,
-                        error,
-                    })?;
-                fees = fees.checked_add(fee).map_err(UtxoError::Supply)?;
-            }
-
-            let txid = transaction.txid();
-            for (output_index, output) in transaction.outputs().iter().enumerate() {
-                let outpoint = OutPoint {
-                    txid,
-                    // Outputs are limited to MAX_TX_OUTPUTS, far below u16::MAX.
-                    index: u16::try_from(output_index).expect("output count fits in u16"),
-                };
-                // An output may not overwrite an unspent coin (BIP 30). A
-                // coinbase commits to its height, so this needs a collision.
-                if (self.coins.contains_key(&outpoint) && !spent_in_set.contains(&outpoint))
-                    || created.contains_key(&outpoint)
-                {
-                    return Err(UtxoError::DuplicateOutput(outpoint));
-                }
-                created.insert(
-                    outpoint,
-                    Coin {
-                        output: *output,
-                        height,
-                        is_coinbase: transaction.is_coinbase(),
-                    },
-                );
-            }
-        }
-
-        let claimed = match &block.transactions()[0] {
-            Transaction::Coinbase(coinbase) => coinbase.output_total(),
-            Transaction::Normal(_) => unreachable!("Block requires a coinbase first"),
-        };
-        let allowed = rules.subsidy.checked_add(fees).map_err(UtxoError::Supply)?;
-        if claimed > allowed {
-            return Err(UtxoError::CoinbaseTooLarge { allowed, claimed });
-        }
-        // Inputs equal outputs plus fees, so the supply changes by exactly
-        // `claimed - fees`. Computed in u128 so a transient sum cannot overflow.
-        let total = u128::from(self.total_value.as_satoshis()) + u128::from(claimed.as_satoshis())
-            - u128::from(fees.as_satoshis());
-        let total = to_amount(total)?;
-
-        // Commit. Nothing below can fail.
-        for (outpoint, _) in &spent_from_set {
-            self.remove_coin(outpoint);
-        }
-        for (outpoint, coin) in created {
-            self.insert_coin(outpoint, coin);
-        }
-        self.total_value = total;
-        let block_id = block.id();
-        self.tip = Some(Tip { block_id, height });
-        debug_assert_eq!(self.audit(), Ok(()));
-        Ok(BlockUndo {
-            block_id,
-            spent: spent_from_set,
-        })
+        let delta = validate_block(
+            self,
+            self.tip,
+            self.total_value,
+            &BlockShape::of(block),
+            block.transactions(),
+            rules,
+        )?;
+        let undo = delta.undo();
+        self.commit(&delta);
+        Ok(undo)
     }
 
     /// Reverts the tip block atomically, using the undo data
     /// [`UtxoSet::apply_block`] returned for it.
     pub fn revert_block(&mut self, block: &Block, undo: &BlockUndo) -> Result<(), UtxoError> {
-        let block_id = block.id();
-        if self.tip().map(|tip| tip.block_id) != Some(block_id) || undo.block_id != block_id {
-            return Err(UtxoError::NotTip(block_id));
-        }
-
-        let created = created_outpoints(block);
-
-        let mut total = u128::from(self.total_value.as_satoshis());
-        for outpoint in &created {
-            let coin = self.coins.get(outpoint).ok_or(UtxoError::CorruptUndo)?;
-            total -= u128::from(coin.output.amount.as_satoshis());
-        }
-        for (outpoint, coin) in &undo.spent {
-            if self.coins.contains_key(outpoint) {
-                return Err(UtxoError::CorruptUndo);
-            }
-            total += u128::from(coin.output.amount.as_satoshis());
-        }
-        let total = to_amount(total)?;
-
-        for outpoint in &created {
-            self.remove_coin(outpoint);
-        }
-        for (outpoint, coin) in &undo.spent {
-            self.insert_coin(*outpoint, *coin);
-        }
-        self.total_value = total;
-        self.tip = block.height().checked_sub(1).map(|height| Tip {
-            block_id: block.header().prev_block,
-            height,
-        });
-        debug_assert_eq!(self.audit(), Ok(()));
+        let delta = revert_delta(
+            self,
+            self.tip,
+            self.total_value,
+            &BlockShape::of(block),
+            &created_outpoints(block),
+            undo,
+        )?;
+        self.commit(&delta);
         Ok(())
     }
+
+    /// Applies a validated change. Nothing here can fail.
+    pub fn commit(&mut self, delta: &UtxoDelta) {
+        for (outpoint, _) in &delta.removed {
+            self.remove_coin(outpoint);
+        }
+        for (outpoint, coin) in &delta.added {
+            self.insert_coin(*outpoint, *coin);
+        }
+        self.total_value = delta.total_value;
+        self.tip = delta.tip;
+        debug_assert_eq!(self.audit(), Ok(()));
+    }
+}
+
+impl CoinSource for UtxoSet {
+    fn coin(&self, outpoint: &OutPoint) -> Result<Option<Coin>, SourceError> {
+        Ok(self.coins.get(outpoint).copied())
+    }
+}
+
+/// Where coins are read from during validation: the in-memory [`UtxoSet`]
+/// or the on-disk store.
+pub trait CoinSource {
+    /// Looks up an unspent output. An error means the source could not be
+    /// read; it never means the coin is missing.
+    fn coin(&self, outpoint: &OutPoint) -> Result<Option<Coin>, SourceError>;
+}
+
+/// A coin source could not be read. The source keeps the details.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SourceError;
+
+/// The parts of a block validation needs besides its transactions.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BlockShape {
+    /// The block id.
+    pub block_id: BlockId,
+    /// Its parent.
+    pub prev_block: BlockId,
+    /// Its height.
+    pub height: u64,
+}
+
+impl BlockShape {
+    /// The shape of a full block.
+    #[must_use]
+    pub fn of(block: &Block) -> Self {
+        Self {
+            block_id: block.id(),
+            prev_block: block.header().prev_block,
+            height: block.height(),
+        }
+    }
+}
+
+/// A transaction as validation sees it: a full transaction, or one whose
+/// witnesses were pruned after this node validated it.
+pub trait BodyTransaction {
+    /// The transaction id.
+    fn txid(&self) -> TransactionId;
+    /// Whether it is a coinbase.
+    fn is_coinbase(&self) -> bool;
+    /// Its inputs.
+    fn inputs(&self) -> &[Input];
+    /// Its outputs.
+    fn outputs(&self) -> &[Output];
+    /// The rules that need the spent outputs; returns the fee.
+    fn check_spend(&self, chain_id: &Hash256, spent: &[Output])
+    -> Result<Amount, TransactionError>;
+}
+
+impl BodyTransaction for Transaction {
+    fn txid(&self) -> TransactionId {
+        Self::txid(self)
+    }
+
+    fn is_coinbase(&self) -> bool {
+        Self::is_coinbase(self)
+    }
+
+    fn inputs(&self) -> &[Input] {
+        Self::inputs(self)
+    }
+
+    fn outputs(&self) -> &[Output] {
+        Self::outputs(self)
+    }
+
+    fn check_spend(
+        &self,
+        chain_id: &Hash256,
+        spent: &[Output],
+    ) -> Result<Amount, TransactionError> {
+        match self {
+            Self::Normal(normal) => normal.validate_spend(chain_id, spent),
+            Self::Coinbase(_) => Ok(Amount::ZERO),
+        }
+    }
+}
+
+impl BodyTransaction for StrippedTransaction {
+    fn txid(&self) -> TransactionId {
+        Self::txid(self)
+    }
+
+    fn is_coinbase(&self) -> bool {
+        Self::is_coinbase(self)
+    }
+
+    fn inputs(&self) -> &[Input] {
+        Self::inputs(self)
+    }
+
+    fn outputs(&self) -> &[Output] {
+        Self::outputs(self)
+    }
+
+    /// Value conservation only: the signatures were verified when this node
+    /// first validated the block, before its witnesses were pruned.
+    fn check_spend(
+        &self,
+        _chain_id: &Hash256,
+        spent: &[Output],
+    ) -> Result<Amount, TransactionError> {
+        match self {
+            Self::Normal(unsigned) => unsigned.fee(spent),
+            Self::Coinbase(_) => Ok(Amount::ZERO),
+        }
+    }
+}
+
+/// A validated change to the unspent-output set.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UtxoDelta {
+    /// The block applied or reverted.
+    pub block_id: BlockId,
+    /// Coins that leave the set, with their contents (the undo data when a
+    /// block is applied).
+    pub removed: Vec<(OutPoint, Coin)>,
+    /// Coins that enter the set.
+    pub added: Vec<(OutPoint, Coin)>,
+    /// The tip afterwards.
+    pub tip: Option<Tip>,
+    /// The total value of all unspent outputs afterwards.
+    pub total_value: Amount,
+}
+
+impl UtxoDelta {
+    /// The undo data of an applied block.
+    #[must_use]
+    pub fn undo(&self) -> BlockUndo {
+        BlockUndo {
+            block_id: self.block_id,
+            spent: self.removed.clone(),
+        }
+    }
+}
+
+fn read(source: &impl CoinSource, outpoint: &OutPoint) -> Result<Option<Coin>, UtxoError> {
+    source
+        .coin(outpoint)
+        .map_err(|SourceError| UtxoError::Unavailable)
+}
+
+/// Validates a block against `source`, whose tip is `tip` and whose total
+/// value is `total_value`, without changing anything. Every consensus rule
+/// that needs the unspent outputs is here.
+pub fn validate_block<T: BodyTransaction>(
+    source: &impl CoinSource,
+    tip: Option<Tip>,
+    total_value: Amount,
+    shape: &BlockShape,
+    transactions: &[T],
+    rules: &BlockRules,
+) -> Result<UtxoDelta, UtxoError> {
+    let height = shape.height;
+    let (expected_parent, expected_height) = match tip {
+        Some(tip) => (tip.block_id, tip.height + 1),
+        None => (BlockId::new(Hash256::new([0; 32])), 0),
+    };
+    if shape.prev_block != expected_parent {
+        return Err(UtxoError::WrongParent {
+            expected: expected_parent,
+            actual: shape.prev_block,
+        });
+    }
+    if height != expected_height {
+        return Err(UtxoError::WrongHeight {
+            expected: expected_height,
+            actual: height,
+        });
+    }
+    let Some(first) = transactions.first().filter(|first| first.is_coinbase()) else {
+        return Err(UtxoError::MissingCoinbase);
+    };
+
+    // Stage the block: outputs created earlier in the block may be spent
+    // later in it, and coins from the source are only marked as spent.
+    let mut created: HashMap<OutPoint, Coin> = HashMap::new();
+    let mut created_order: Vec<OutPoint> = Vec::new();
+    let mut spent_from_set: Vec<(OutPoint, Coin)> = Vec::new();
+    let mut spent_in_set: HashSet<OutPoint> = HashSet::new();
+    let mut fees = Amount::ZERO;
+
+    for (index, transaction) in transactions.iter().enumerate() {
+        if !transaction.is_coinbase() {
+            let mut spent_outputs = Vec::with_capacity(transaction.inputs().len());
+            for (input_index, input) in transaction.inputs().iter().enumerate() {
+                let outpoint = input.previous_output;
+                let coin = if let Some(coin) = created.remove(&outpoint) {
+                    coin
+                } else {
+                    // `Block` already refuses repeated outpoints, so a coin
+                    // from the source is never seen twice here.
+                    let coin = read(source, &outpoint)?.ok_or(UtxoError::MissingCoin {
+                        transaction: index,
+                        input: input_index,
+                    })?;
+                    spent_in_set.insert(outpoint);
+                    spent_from_set.push((outpoint, coin));
+                    coin
+                };
+                if coin.is_coinbase && height - coin.height < rules.coinbase_maturity {
+                    return Err(UtxoError::ImmatureCoinbase {
+                        transaction: index,
+                        input: input_index,
+                    });
+                }
+                spent_outputs.push(coin.output);
+            }
+            let fee = transaction
+                .check_spend(&rules.chain_id, &spent_outputs)
+                .map_err(|error| UtxoError::Transaction {
+                    transaction: index,
+                    error,
+                })?;
+            fees = fees.checked_add(fee).map_err(UtxoError::Supply)?;
+        }
+
+        let txid = transaction.txid();
+        for (output_index, output) in transaction.outputs().iter().enumerate() {
+            let outpoint = OutPoint {
+                txid,
+                // Outputs are limited to MAX_TX_OUTPUTS, far below u16::MAX.
+                index: u16::try_from(output_index).map_err(|_| UtxoError::CorruptUndo)?,
+            };
+            // An output may not overwrite an unspent coin (BIP 30). A
+            // coinbase commits to its height, so this needs a collision.
+            if (!spent_in_set.contains(&outpoint) && read(source, &outpoint)?.is_some())
+                || created.contains_key(&outpoint)
+            {
+                return Err(UtxoError::DuplicateOutput(outpoint));
+            }
+            created.insert(
+                outpoint,
+                Coin {
+                    output: *output,
+                    height,
+                    is_coinbase: transaction.is_coinbase(),
+                },
+            );
+            created_order.push(outpoint);
+        }
+    }
+
+    let mut claimed = Amount::ZERO;
+    for output in first.outputs() {
+        claimed = claimed
+            .checked_add(output.amount)
+            .map_err(UtxoError::Supply)?;
+    }
+    let allowed = rules.subsidy.checked_add(fees).map_err(UtxoError::Supply)?;
+    if claimed > allowed {
+        return Err(UtxoError::CoinbaseTooLarge { allowed, claimed });
+    }
+    // Inputs equal outputs plus fees, so the supply changes by exactly
+    // `claimed - fees`. Computed in u128 so a transient sum cannot overflow.
+    let total = u128::from(total_value.as_satoshis()) + u128::from(claimed.as_satoshis())
+        - u128::from(fees.as_satoshis());
+    let total = to_amount(total)?;
+
+    // Keep the creation order so every store writes the same sequence.
+    let added: Vec<(OutPoint, Coin)> = created_order
+        .into_iter()
+        .filter_map(|outpoint| created.get(&outpoint).map(|coin| (outpoint, *coin)))
+        .collect();
+    Ok(UtxoDelta {
+        block_id: shape.block_id,
+        removed: spent_from_set,
+        added,
+        tip: Some(Tip {
+            block_id: shape.block_id,
+            height,
+        }),
+        total_value: total,
+    })
+}
+
+/// Validates the reversal of the tip block, given the outpoints it created
+/// and its undo data, without changing anything.
+pub fn revert_delta(
+    source: &impl CoinSource,
+    tip: Option<Tip>,
+    total_value: Amount,
+    shape: &BlockShape,
+    created: &[OutPoint],
+    undo: &BlockUndo,
+) -> Result<UtxoDelta, UtxoError> {
+    let block_id = shape.block_id;
+    if tip.map(|tip| tip.block_id) != Some(block_id) || undo.block_id != block_id {
+        return Err(UtxoError::NotTip(block_id));
+    }
+    let mut total = u128::from(total_value.as_satoshis());
+    let mut removed = Vec::with_capacity(created.len());
+    for outpoint in created {
+        let coin = read(source, outpoint)?.ok_or(UtxoError::CorruptUndo)?;
+        total = total
+            .checked_sub(u128::from(coin.output.amount.as_satoshis()))
+            .ok_or(UtxoError::CorruptUndo)?;
+        removed.push((*outpoint, coin));
+    }
+    for (outpoint, coin) in &undo.spent {
+        if read(source, outpoint)?.is_some() {
+            return Err(UtxoError::CorruptUndo);
+        }
+        total += u128::from(coin.output.amount.as_satoshis());
+    }
+    Ok(UtxoDelta {
+        block_id,
+        removed,
+        added: undo.spent.clone(),
+        tip: shape.height.checked_sub(1).map(|height| Tip {
+            block_id: shape.prev_block,
+            height,
+        }),
+        total_value: to_amount(total)?,
+    })
 }
 
 /// Returns the outputs `block` adds to the set: all of its outputs except
 /// those spent later in the same block, which never reach the set.
 #[must_use]
 pub fn created_outpoints(block: &Block) -> Vec<OutPoint> {
-    let spent_inside: HashSet<OutPoint> = block
-        .transactions()
+    created_outpoints_of(block.transactions())
+}
+
+/// [`created_outpoints`] for any block body, full or pruned.
+#[must_use]
+pub fn created_outpoints_of<T: BodyTransaction>(transactions: &[T]) -> Vec<OutPoint> {
+    let spent_inside: HashSet<OutPoint> = transactions
         .iter()
-        .flat_map(Transaction::inputs)
+        .flat_map(BodyTransaction::inputs)
         .map(|input| input.previous_output)
         .collect();
     let mut created = Vec::new();
-    for transaction in block.transactions() {
+    for transaction in transactions {
         let txid = transaction.txid();
         for index in 0..transaction.outputs().len() {
-            let outpoint = OutPoint {
-                txid,
-                index: u16::try_from(index).expect("output count fits in u16"),
+            let Ok(index) = u16::try_from(index) else {
+                continue;
             };
+            let outpoint = OutPoint { txid, index };
             if !spent_inside.contains(&outpoint) {
                 created.push(outpoint);
             }
@@ -521,6 +741,20 @@ pub enum UtxoError {
     NotTip(BlockId),
     /// The undo data does not match the set.
     CorruptUndo,
+    /// The block body does not start with a coinbase.
+    MissingCoinbase,
+    /// The coin source could not be read. This says nothing about the
+    /// block: it must never mark a block invalid.
+    Unavailable,
+}
+
+impl UtxoError {
+    /// Whether this error proves the block invalid, as opposed to a failure
+    /// to read the coins.
+    #[must_use]
+    pub const fn is_invalid_block(&self) -> bool {
+        !matches!(self, Self::Unavailable)
+    }
 }
 
 impl fmt::Display for UtxoError {
@@ -555,6 +789,10 @@ impl fmt::Display for UtxoError {
             Self::SupplyMismatch => formatter.write_str("tracked supply differs from the coins"),
             Self::NotTip(block_id) => write!(formatter, "block {block_id} is not the tip"),
             Self::CorruptUndo => formatter.write_str("undo data does not match the set"),
+            Self::MissingCoinbase => {
+                formatter.write_str("the block does not start with a coinbase")
+            }
+            Self::Unavailable => formatter.write_str("the coins could not be read"),
         }
     }
 }

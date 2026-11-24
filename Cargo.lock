@@ -703,6 +703,7 @@ dependencies = [
  "itacoin-primitives",
  "itacoin-process",
  "itacoin-rpc",
+ "itacoin-storage",
  "itacoin-transaction",
  "serde",
  "serde_json",

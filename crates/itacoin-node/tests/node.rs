@@ -410,3 +410,100 @@ fn the_embedded_miner_finds_blocks_other_nodes_accept() {
         a.call("getblockhash", vec![json!(1)])
     );
 }
+
+fn generate(node: &Node, count: u64, address: &str) {
+    let mut left = count;
+    while left > 0 {
+        let step = left.min(100);
+        node.call("generatetoaddress", vec![json!(step), json!(address)]);
+        left -= step;
+    }
+}
+
+fn rpc_error(node: &Node, method: &str, params: Vec<Value>) -> i64 {
+    match node.try_client().unwrap().call(method, params) {
+        Err(itacoin_rpc::ClientError::Rpc { code, .. }) => code,
+        other => panic!("{method}: expected an RPC error, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_pruned_node_reindexes_and_refuses_archive_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut node = Node::start(dir.path(), "regtest", &["--prune-witnesses", "288"]);
+    let mine = regtest_address(WalletId::new(Hash256::new([8; 32])));
+    generate(&node, 320, &mine);
+    let info = node.call("getblockchaininfo", vec![]);
+    assert_eq!(info["pruned"], json!(true));
+    assert!(info["prune_height"].as_u64().unwrap() >= 20, "{info}");
+    let old = node.call("getblockhash", vec![json!(5)]);
+    assert_eq!(
+        rpc_error(&node, "getblock", vec![old.clone(), json!(0)]),
+        -1_032
+    );
+    let summary = node.call("getblock", vec![old.clone(), json!(2)]);
+    assert_eq!(summary["witnesses_pruned"], json!(true));
+    assert_eq!(summary["height"], json!(5));
+    let recent = node.call("getblockhash", vec![json!(310)]);
+    assert!(node.call("getblock", vec![recent, json!(0)]).is_string());
+    let tip = node.call("getbestblockhash", vec![]);
+    let supply = info["supply_sat"].clone();
+    node.terminate();
+
+    // Pruning is one-way.
+    node.extra = Vec::new();
+    let output = node.command().output().unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("pruned"));
+
+    // A reindexation rebuilds the same state, then the audits pass.
+    node.extra = [
+        "--prune-witnesses",
+        "288",
+        "--reindex",
+        "--check-utxo",
+        "--check-blocks",
+        "320",
+    ]
+    .map(str::to_owned)
+    .to_vec();
+    node.spawn();
+    assert_eq!(node.call("getbestblockhash", vec![]), tip);
+    assert_eq!(node.call("getblockchaininfo", vec![])["supply_sat"], supply);
+    let unspent = node.call("listunspent", vec![json!([mine]), Value::Null, json!(5)]);
+    assert_eq!(unspent["unspent"].as_array().unwrap().len(), 5);
+}
+
+#[test]
+fn old_blocks_are_fetched_only_from_full_nodes() {
+    let dirs: Vec<_> = (0..3).map(|_| tempfile::tempdir().unwrap()).collect();
+    let archive = Node::start(dirs[0].path(), "regtest", &[]);
+    generate(
+        &archive,
+        320,
+        &regtest_address(WalletId::new(Hash256::new([9; 32]))),
+    );
+    let archive_addr = archive.p2p.to_string();
+    let pruned = Node::start(
+        dirs[1].path(),
+        "regtest",
+        &["--prune-witnesses", "288", "--connect", &archive_addr],
+    );
+    assert!(eventually(|| pruned.height() == 320));
+
+    // A new node that only knows the pruned peer learns the headers but
+    // cannot get the old blocks from it.
+    let pruned_addr = pruned.p2p.to_string();
+    let fresh = Node::start(dirs[2].path(), "regtest", &["--connect", &pruned_addr]);
+    assert!(eventually(
+        || fresh.call("getblockchaininfo", vec![])["headers"] == json!(320)
+    ));
+    sleep(Duration::from_secs(3));
+    assert_eq!(fresh.height(), 0);
+    let peers = fresh.call("getpeerinfo", vec![]);
+    assert_eq!(peers.as_array().unwrap().len(), 1);
+
+    // Once a full node is reachable, the sync completes.
+    fresh.call("addnode", vec![json!(archive_addr), json!("onetry")]);
+    assert!(eventually(|| fresh.height() == 320));
+}

@@ -36,6 +36,8 @@ pub mod code {
     pub const UNAVAILABLE: i64 = -1_030;
     /// The node is still in initial block download.
     pub const IN_IBD: i64 = -1_031;
+    /// The block's witnesses were pruned.
+    pub const BLOCK_PRUNED: i64 = -1_032;
 }
 
 /// A JSON-RPC error object.
